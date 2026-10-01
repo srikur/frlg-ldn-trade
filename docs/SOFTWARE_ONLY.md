@@ -1,6 +1,6 @@
 # Software-only connection research
 
-Checked 2026-09-30. Target: an unmodified Switch 2 running retail FireRed,
+Checked 2026-10-01. Target: an unmodified Switch 2 running retail FireRed,
 trading individual `.pk3` files from an existing computer.
 
 ## Findings
@@ -16,13 +16,15 @@ trading individual `.pk3` files from an existing computer.
    Connecting both devices to a home router does not provide that interface.
    [LDN library](https://github.com/kinnay/LDN#usage-instructions)
 
-3. **Native macOS remains unproven here.** The local Mac runs arm64 macOS 27
-   and reports an N1 Wi-Fi 7 device using `IO80211_driverkit`. Public CoreWLAN
-   documentation describes interface/network selection, not an LDN raw-frame
-   transport. A sandboxed, non-activating libpcap monitor-capability query
-   returned an error; this is inconclusive, not proof of hardware limitations.
-   No capture or transmission test was performed.
-   [Apple CoreWLAN](https://developer.apple.com/documentation/corewlan)
+3. **Native macOS is an active research path.** The Linux joining code uses a
+   managed station with static CCMP keys, so full raw injection is not the only
+   candidate. The local N1 Mac uses the Centauri DriverKit stack. Its libpcap
+   capability query returns 1 with administrator access: monitor mode is
+   advertised. The ordinary-user failure was a permission error. A native
+   read-only probe builds with `make mac-probe`, and a separate bounded passive
+   listener with `make mac-listen`. Actual reception, transmission and private
+   key-control access remain to be proven for LDN.
+   [Native Mac evidence and experiments](NATIVE_MAC.md)
 
 4. **Windows alternatives do not establish built-in-radio support.** The
    published `ldnd.exe` workflow uses a compatible USB adapter with a WinUSB

@@ -10,6 +10,10 @@ not required if an existing radio and Linux driver support LDN. Switch
 `prod.keys` are still required. Native Mac/Windows and key-free transports have
 not been implemented. See [software-only research](docs/SOFTWARE_ONLY.md).
 
+For the native Mac investigation, `make mac-probe` builds a read-only Wi-Fi
+capability probe. See [the findings and next experiments](docs/NATIVE_MAC.md).
+This is a diagnostic, not a live Mac trading backend.
+
 This fork has passed offline tests with synthetic data, including all 386
 species. **Its changes have not yet been tested against a real Switch 2.**
 

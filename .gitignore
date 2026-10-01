@@ -5,9 +5,11 @@
 /*/
 !/frlgsim/
 !/tests/
+!/native/
 !/docs/
 !/docs/UPSTREAM.md
 !/docs/SOFTWARE_ONLY.md
+!/docs/NATIVE_MAC.md
 
 # Never publish Pokemon data files (live-trade outputs can carry trainer/account
 # identifiers); covers any stray .pk3/.ek3 at the root or inside frlgsim/ too.
