@@ -56,11 +56,12 @@ def run_live(run_config, lg):
     plan, ldn, options = run_config.plan, run_config.ldn, run_config.role
     profile = run_config.profile
     lg(f"[live] scanning for FRLG LDN network (nickname={profile.name})...")
+    # Validate inputs before touching the radio or joining a real console.
+    engine = make_engine(run_config, lg)
     t = tmod.LiveTransport(
         password=ldn.password, nickname=profile.name, keys_path=ldn.keys_path,
         local_comm_id=ldn.local_comm_id, phyname=ldn.phy, log=lg).start()
     pc = cryptomod.PiaCrypto(t.ssid)
-    engine = make_engine(run_config, lg)
     # Pia CONNECTION layer (S0): Net 0x11->0x12, Session(13) join, RTT keepalive. WITHOUT this the
     # host never registers us as a peer (no "OK"); the sim must NOT emit trade traffic or sit down
     # until the host confirms the connection [frlgsim/pia_connect.py; wiki Pia 6.32+]. The MACs are
@@ -150,9 +151,9 @@ def run_live(run_config, lg):
             # mon data is already valid at commit. Writing here means the received mon survives an
             # abrupt exit. save_received() is idempotent (re-writes all received).
             if engine.commits > saved_commits:
-                saved_commits = engine.commits
                 try:
-                    n = save_received(engine, args, lg)
+                    n = save_received(engine, run_config, lg)
+                    saved_commits = engine.commits
                     lg(f"[live] trade committed -> saved {n} received mon(s) to disk now "
                           f"(robust to an abrupt exit)")
                 except Exception as e:                       # never let a save error kill the link tail
@@ -349,7 +350,7 @@ def build_parser():
     ap.add_argument("--phy", default="phy0", help="wifi phy for the LDN join (live)")
     ap.add_argument("--keys", default="~/.switch/prod.keys", help="Switch prod.keys (live)")
     ap.add_argument("--comm-id", help="LDN local_communication_id (hex) to join (live); "
-                    "if omitted, joins the only available network (scan logs candidates)")
+                    "if omitted, only joins an FRLG network (scan logs candidates)")
     ap.add_argument("--capture", metavar="FILE", help="(live) record EVERY Pia datagram both "
                     "directions to a .jsonl (incl. the SSID), so a live attempt can be "
                     "decrypted/analysed offline")

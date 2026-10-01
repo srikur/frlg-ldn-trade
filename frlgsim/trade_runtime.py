@@ -51,6 +51,8 @@ def load_party(paths, log=lambda *parts: None):
     """Load and describe a sequence of .pk3/.ek3 files."""
     party = [monmod.Mon.from_file(path) for path in paths]
     for index, pokemon in enumerate(party):
+        if pokemon.species not in monmod.DEX_SPECIES or pokemon.raw[19] & 1:
+            raise ValueError(f"party slot {index}: empty, unsupported species, or Bad Egg")
         log(f"  party slot {index}: {pokemon.describe()}")
     return party
 

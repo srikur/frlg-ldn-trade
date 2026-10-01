@@ -12,8 +12,8 @@ Layer stack (bottom-up), one per-VBlank RFU command slot becomes:
           -> zstd (optional) + Pia AES-GCM (crypto.py)
             -> UDP :12345 (transport.py)
 
-The trade payloads are PKHeX-compatible .pk3 files (mon.py): the on-wire 100-byte party
-`struct Pokemon` (encrypted + shuffled) IS the canonical .pk3 layout.
+The input/output files are PKHeX-compatible .pk3 files (mon.py). The on-wire
+100-byte party struct uses the encrypted, shuffled .ek3 form.
 
 The overworld/seat phase (before the trade engine has block work) is driven by linkstate.py: a
 held-keys (0xBE00) keepalive FSM that sits the joiner at the RIGHT seat (mpId 1) and exits via a

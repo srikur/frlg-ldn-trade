@@ -1,9 +1,9 @@
 """Gen-3 mon (.pk3) I/O for the trade.
 
-The on-wire 100-byte party `struct Pokemon` (encrypted + shuffled) IS the canonical PKHeX
-.pk3 layout, so injecting a chosen mon is essentially a memcpy - no re-encryption. `decode_mon`
-below is the checksum oracle (the only validity gate that matters: the 16-bit checksum over the
-48-byte secure region; party stats are NOT covered, so they are cosmetic for the trade). It was
+The on-wire 100-byte party `struct Pokemon` is the encrypted, shuffled .ek3 layout.
+PKHeX .pk3 files use decrypted, canonical substructures and must be converted.
+`decode_mon` checks the 16-bit checksum over the 48-byte secure region; a valid
+checksum alone does not establish species validity or encounter legality. It was
 originally from a separate sniffing/analysis tool; it lives here so frlgsim has no external dependency.
 
 struct Pokemon (include/pokemon.h, 100B) = BoxPokemon(80B) + party tail:
@@ -17,6 +17,7 @@ gPlayerParty is 6 slots (600B) sent as three 200B blocks, empty slots = zeroed s
 # ── Gen-3 mon decode oracle (checksum + species/text), inlined from a separate
 #    traffic-sniffing tool so frlgsim stands alone. ────────────────────────────────
 from . import stats
+from .species import SPECIES as DEX_SPECIES
 
 # Substructure order by (personality % 24); each string = logical struct in physical
 # slots 0..3.  G=Growth(0) A=Attacks(1) E=EVs(2) M=Misc(3).
@@ -65,7 +66,7 @@ def load_species(decomp="~/Git/pokefirered"):
             if g:
                 m.setdefault(int(g.group(2)), g.group(1))
     except OSError:
-        m = {4: "CHARMANDER", 5: "CHARMELEON", 16: "PIDGEY", 19: "RATTATA"}  # fallback
+        m = {species: name for species, (_, name) in DEX_SPECIES.items()}
     return m
 
 
@@ -161,7 +162,7 @@ def _wire_valid(b):
 
 
 class Mon:
-    """One Pokémon, held as its 100-byte party struct (the .pk3 wire form)."""
+    """One Pokémon, held as its 100-byte encrypted party struct (.ek3 wire form)."""
 
     def __init__(self, party100):
         if len(party100) != PARTY_MON_SIZE:
@@ -170,9 +171,11 @@ class Mon:
 
     # ---- construction -------------------------------------------------------
     @classmethod
-    def from_pk3(cls, data):
+    def from_pk3(cls, data, *, encrypted=None):
         """Accept a PKHeX mon in EITHER form - .ek3 (encrypted, the raw save/wire format) or
-        .pk3 (decrypted) - in 80-byte box or 100-byte party size. Auto-detects: if the bytes
+        .pk3 (decrypted) - in 80-byte box or 100-byte party size. Pass encrypted=False
+        for .pk3, True for .ek3. from_file uses the extension to avoid ambiguous checksums.
+        With encrypted=None, auto-detects: if the bytes
         already checksum-validate they are the encrypted wire form; otherwise they are decrypted
         and we encrypt+shuffle them. A box export carries no party tail (level/stats), so we derive
         it from the box data - both an 80-byte box widened to 100B and a 100-byte export with a
@@ -188,11 +191,17 @@ class Mon:
         # Assume the common INJECTION case (a decrypted PKHeX .pk3) and (re)build the wire form;
         # for a key==0 .ek3 pass a key!=0 mon or use the .ek3 path explicitly.
         key = int.from_bytes(data[0:4], "little") ^ int.from_bytes(data[4:8], "little")
-        if _wire_valid(data) and key != 0:
+        if encrypted is True:
+            wire = data
+        elif encrypted is False:
+            wire = to_encrypted(data)
+        elif _wire_valid(data) and key != 0:
             wire = data                                # already .ek3 (encrypted)
         else:
             enc = to_encrypted(data)                   # treat as .pk3 (decrypted) -> shuffle + encrypt
-            wire = enc if _wire_valid(enc) else data   # fall back to as-is (e.g. bad egg)
+            wire = enc
+        if not _wire_valid(wire):
+            raise ValueError("invalid Pokemon checksum; refusing to trade corrupt data")
         if len(wire) == BOX_SIZE:
             # Widen an 80B box to 100B party. Default mail = MAIL_NONE (0xFF): a zeroed mail byte
             # reads as mail slot 0, which the host treats as real mail on the OFFERED mon. The tail
@@ -212,8 +221,11 @@ class Mon:
 
     @classmethod
     def from_file(cls, path):
+        from pathlib import Path
+        suffix = Path(path).suffix.lower()
+        encrypted = {".pk3": False, ".ek3": True}.get(suffix)
         with open(path, "rb") as f:
-            return cls.from_pk3(f.read())
+            return cls.from_pk3(f.read(), encrypted=encrypted)
 
     @classmethod
     def empty(cls):
@@ -233,7 +245,7 @@ class Mon:
 
     @property
     def is_empty(self):
-        return int.from_bytes(self.raw[0:8], "little") == 0
+        return self.species == 0
 
     @property
     def checksum_ok(self):
@@ -281,17 +293,34 @@ class Mon:
         """Write the DECRYPTED .pk3 (opens directly in PKHeX)."""
         if size not in (BOX_SIZE, PARTY_MON_SIZE):
             raise ValueError("size must be 80 (box) or 100 (party)")
-        with open(path, "wb") as f:
-            f.write(to_decrypted(self.raw)[:size])
+        _atomic_save(path, to_decrypted(self.raw)[:size])
         return path
 
     def save_ek3(self, path, size=PARTY_MON_SIZE):
         """Write the ENCRYPTED .ek3 (raw save/wire bytes)."""
         if size not in (BOX_SIZE, PARTY_MON_SIZE):
             raise ValueError("size must be 80 (box) or 100 (party)")
-        with open(path, "wb") as f:
-            f.write(self.raw[:size])
+        _atomic_save(path, self.raw[:size])
         return path
+
+
+def _atomic_save(path, data):
+    """Keep the previous backup intact if a process dies during a later save."""
+    import os
+    from pathlib import Path
+    import tempfile
+    target = Path(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".received-", delete=False) as f:
+            temporary = f.name
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, target)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def build_player_party(mons):

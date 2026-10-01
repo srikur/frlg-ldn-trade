@@ -328,6 +328,8 @@ class LiveTransport:
         free the radio and retry up to `attempts` times, logging each attempt's FULLY-UNWRAPPED
         cause (see _format_join_error) so persistent problems are still diagnosable instead of
         hidden behind trio's opaque ExceptionGroup."""
+        from .preflight import require_live
+        require_live(self.keys_path, self.phyname)
         last_err = None
         for attempt in range(1, attempts + 1):
             free_radio({self.phyname}, self.log)        # clear the radio before each join attempt
@@ -381,13 +383,9 @@ class LiveTransport:
                 self.log(f"[live] saw network comm_id=0x{n.local_communication_id:016x} "
                          f"scene={n.scene_id} app_version={n.app_version} {n.num_participants}/{n.max_participants} "
                          f"accept_policy={getattr(n, 'accept_policy', '?')}")
-            # Prefer an exact FRLG comm-id match; else fall back to the only joinable network.
+            # Only join the requested game. A lone unrelated game must never be selected.
             net = next((n for n in joinable
                         if n.local_communication_id == self.LOCAL_COMMUNICATION_ID), None)
-            if net is None and len(joinable) == 1:
-                net = joinable[0]
-                self.log(f"[live] no comm-id match; using the only joinable network "
-                         f"(comm_id=0x{net.local_communication_id:016x})")
             if net is None:
                 self._err = (f"no joinable FRLG network (saw {len(networks)}, "
                              f"{len(joinable)} joinable) - set --comm-id from the list above")

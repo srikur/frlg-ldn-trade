@@ -1,81 +1,151 @@
-# frlg-ldn-trade
+# FRLG living-dex trader
 
-A proof-of-concept demonstrating that it is indeed possible for a computer to interact with Gen 3 Pokémon games running on Switch/Switch 2 via local wireless (LDN).
+A fork of [tornadus/frlg-ldn-trade](https://github.com/tornadus/frlg-ldn-trade)
+for moving Gen-3 `.pk3` collections into FireRed/LeafGreen on Switch or Switch 2
+through in-game trades.
 
----
+Collection commands work on macOS, Windows, and Linux with Python 3.12+.
+**Live trading currently uses upstream's Linux Wi-Fi transport.** An ESP32 is
+not required if an existing radio and Linux driver support LDN. Switch
+`prod.keys` are still required. Native Mac/Windows and key-free transports have
+not been implemented. See [software-only research](docs/SOFTWARE_ONLY.md).
 
-## Why?
+This fork has passed offline tests with synthetic data, including all 386
+species. **Its changes have not yet been tested against a real Switch 2.**
 
-This project basically exists to prove that it can be done. From here, I'm hoping the community takes notice so that we can get things like an unofficial GTS and online battling going. It should serve as a pretty good reference for anyone interested in pursuing these goals or anything else related to multiplayer within these games. And before you ask, yes, **AI tools were used extensively during the creation of this project**. Difficult to call it "vibe coding" though, Claude required A LOT of steering and was basically lost without me laying out the path forward step-by-step. The main benefit was massively speeding up the reverse engineering work. If you'd like to contribute to the effort, join the [Discord!](https://discord.gg/PyvaVYnpXC)
+## Audit your collection
 
-## Demonstration
-https://github.com/user-attachments/assets/b0df878e-67f0-483d-ae81-583cfc2a8692
+These commands need no dependencies or Switch keys:
 
-This demo was recorded using the **ALFA AWUS036ACHM**. The RZ616 is half as fast on average and sometimes deadlocks before gracefully exiting.
+```sh
+python3 frlgdex.py doctor
+python3 frlgdex.py audit /path/to/shiny-dex
+python3 frlgdex.py audit /path/to/shiny-dex --json
+```
 
-## Features
+Checks include 80/100-byte files, checksums, shiny status, National Dex coverage,
+duplicate species, eggs, and trade evolutions. Hoenn internal IDs are correctly
+mapped to National Dex order. These checks establish structure, not encounter
+legality or live-game acceptance.
 
-- End-to-end trading with a real game running on a real Switch
-- .pk3/.ek3 input and output
+`.pk3` means decrypted PKHeX format; `.ek3` means encrypted save/link format.
+Correct misleading extensions before import. Original files are never edited
+or deleted by this tool.
 
-## Requirements
-- Linux
-- Python 3.12+, and a venv with requirements installed (see requirements.txt)
-- a compatible WiFi card (see below)
-- A Switch or Switch 2 with FRLG, played to the point where the Direct Corner has been unlocked (~20-40 minutes)
-- At least 2 .pk3 files to serve as simulated party members/trade fodder
-- Switch prod.keys (the default location is ``~/.switch/prod.keys``)
+**Preserving all 386 species:** Kadabra, Machoke, Graveler, and Haunter normally
+evolve when traded. Gen-3 Everstone prevents this. Item-based evolutions are
+also flagged. Prepare any item changes in a separate collection before import;
+this tool does not silently change your Pokémon. Mew/Deoxys without the
+fateful-encounter flag are flagged for review.
 
-### Tested WiFi Cards
+## Import and track progress
 
-| Model            | Type           | Driver  | Reliability  |
-|------------------|----------------|---------|---------------
-| AMD RZ616        | Internal (M.2) | mt7921e | Low          |
-| ALFA AWUS036ACHM | External       | mt76x0u | High         |
-| Realtek RTL8821CE | Internal (PCIe 1x) | rtw88_8821ce | High |
+Keep the workspace outside the source collection:
 
-### Known Problematic WiFi Cards
+```sh
+python3 frlgdex.py init /path/to/shiny-dex --workspace ./transfers
+python3 frlgdex.py status --workspace ./transfers
+python3 frlgdex.py trade --workspace ./transfers
+```
 
-| Model            | Type           | Driver  | Issue        |
-|------------------|----------------|---------|---------------
-| Intel AX200        | Internal (M.2) | iwlwifi | Unable to be assigned ip |
-| Atheros AR9271 | External       | ath9k_htc | Unable to be assigned ip (most of the time) |
+`trade` without `--live` previews the next file and prerequisites. It never
+joins a network or marks a transfer complete. Files are offered in National Dex
+order. Re-importing the same files preserves progress. Changed imported files
+must be restored before offering them; prepare the collection first.
 
-## Usage
-```sudo -E ./venv/bin/python frlgtrade.py --live -o output.pk3 PARTY1.pk3 PARTY2.pk3```
+The initial workflow runs **one trade per session**, following upstream's
+documented route. Upstream also has 1–6 trade options, but this runner does not
+yet use those experimental batch paths. The Switch player chooses and confirms
+each trade and walks out afterward. Plan for 386 outgoing Pokémon and enough
+box space for 386 incoming Pokémon.
 
-**Optional Flags (not comprehensive):**
+## Live setup on Linux
 
-| Flag         | Options          | Purpose        |
-|--------------|------------------|----------------|
-| --verbose    | N/A              | Verbose output  |
-| --phy        | phy# (e.g. phy1)  | WiFi phy selection |
-| --keys       | /path/to/prod.keys | non-default prod.keys location |
-| --ot         | trainer name      | OT name (default EMU) |
-| --version    | firered / leafgreen | game version (default leafgreen) |
-| --id         | TID or TID:SID (decimal) | trainer ID and optional secret ID |
+Use Python 3.12+ and install your distribution's `iw`, `iproute2`, and
+NetworkManager tools. Booting Linux on an existing Windows computer is a
+candidate if its Wi-Fi driver supports the required frames. A normal VM's
+virtual Ethernet adapter does not supply raw Wi-Fi access.
 
-Above is the configuration I suggest using if you'd like a quick and easy demonstration of the program. You can use any of the listed optional flags, they're safe. Many of the undocumented ones are either unfinished, untested, internal tools, or artifacts of experiments that did not/have not yet panned out.
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python frlgdex.py doctor --phy phy0 --keys /absolute/path/prod.keys
+```
 
-**Setup**
-1. Create a Python venv and install all requirements in ``requirements.txt``
-2. Ensure your WiFi card is unmanaged. The easiest way to accomplish this is stopping NetworkManager.
-3. Ensure you can become root. The script requires root to run.
+`doctor` is read-only. It reports the driver and advertised monitor support;
+it does not capture traffic or change networking. Passing is **not** proof of
+frame-injection compatibility; that requires a live test. Upstream reports good
+results with internal RTL8821CE (`rtw88_8821ce`), poor reliability with RZ616
+(`mt7921e`), and problems with Intel AX200.
 
-**Step-by-step Usage**
-1. Select trading at the direct corner and make your console the "Leader".
-2. Run the script. It may take multiple times to successfully connect.
-3. Approve the join request from "EMU".
-4. Walk to the LEFT CHAIR in the trading room. Walking may be laggy.
-5. Select the Pokémon you'd like to trade away.
-6. Accept the trade confirmation. You will be traded the *2nd* simulated party member.
-7. Once you return to the trade menu, cancel the trade.
-8. Walk out.
-9. You'll find PARTY2.pk3 in your party, and the Pokémon you traded will be in pwd as output.pk3 (or whatever you called it). 
- 
-## Credits
-- [kinnay](https://github.com/kinnay) - For the [LDN library](https://github.com/kinnay/LDN) this is built upon, and the excellent [NintendoClients Wiki](https://github.com/kinnay/NintendoClients/wiki)
-- [pokefirered](https://github.com/pret/pokefirered) - A full decompilation of FireRed/LeafGreen, including the Switch port. It served as an important reference.
+The live backend takes the selected adapter away from ordinary networking.
+Run locally, not over SSH through that adapter. Upstream does not automatically
+restore NetworkManager ownership afterward. To restore it, substitute its
+normal interface name for `wlan0`:
 
-## License
-AGPLv3
+```sh
+sudo nmcli device set wlan0 managed yes
+sudo ip link set wlan0 up
+```
+
+On the Switch, unlock the Direct Corner. For the full collection, obtain the
+National Pokédex; completing Celio's network-machine quest is the normal
+preparation for Gen-3 interoperability. Start with a disposable test Pokémon.
+Use an absolute key path because sudo can change the home directory:
+
+```sh
+sudo .venv/bin/python frlgdex.py trade --workspace ./transfers --phy phy0 --keys /absolute/path/prod.keys --live
+```
+
+Then on the Switch:
+
+1. Upstairs in a Pokémon Center, choose **Direct Corner → Trade Center → Become Leader**.
+2. Accept **EMU**, enter the room, and sit in the **left chair**.
+3. Choose the Pokémon to give away and accept the offered Pokémon.
+4. Let the game save, cancel the trade menu, and walk out.
+5. Verify the received Pokémon is in the Switch's saved party/boxes.
+
+The runner supplies the selected file in both simulated party slots: slot 0
+stays with the simulated trainer; slot 1 is offered once. Each attempt gets its
+own source snapshot and `received.pk3` backup. The original remains intact.
+
+The attempt stays in **review** until you verify the console result:
+
+```sh
+python3 frlgdex.py resolve --workspace ./transfers ATTEMPT_ID confirmed
+```
+
+If you verified the Switch did **not** receive it, use `not_traded` instead.
+Do not resolve uncertain results or resolve while the trader is running.
+A received file or successful process exit does not prove the console saved.
+Unresolved attempts block further sends, including after crashes. If the
+workspace was created as root, use sudo for ledger updates too.
+
+## Changes and validation
+
+- Offline audit, full species mapping, and a persistent SQLite transfer ledger.
+- Explicit `.pk3`/`.ek3` decoding, including zero-XOR-key Pokémon.
+- Corrupt-file rejection before radio access.
+- Fixed upstream's undefined `args` reference that broke backups at commit.
+  Backup failures are retried and file replacement is atomic.
+- Platform/key/radio preflight and strict FRLG network selection.
+- Pokémon, saves, keys, captures, and transfer databases excluded from Git.
+
+```sh
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+Tests use generated structures, never user saves or key material. They cover
+all species, substructure permutations, shiny boundaries, corrupt files,
+evolution checks, interrupted transfers, duplicate attempts, source integrity,
+offline operation, and immediate/atomic received-Pokémon backups.
+
+The original entry point remains `frlgtrade.py`.
+See [upstream documentation](docs/UPSTREAM.md).
+
+## Credits and license
+
+[tornadus/frlg-ldn-trade](https://github.com/tornadus/frlg-ldn-trade),
+[kinnay/LDN](https://github.com/kinnay/LDN), and
+[pret/pokefirered](https://github.com/pret/pokefirered).
+AGPL-3.0; see [LICENSE](LICENSE).
