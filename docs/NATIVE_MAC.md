@@ -68,7 +68,8 @@ These are local measurements, not compatibility claims for all Macs.
 | First capture | Radiotap link type 127 activated; 15 seconds, current channel, management filter, no promiscuous request: zero delivered packets |
 | Second capture | CoreWLAN selected channel 6 from channel 44; promiscuous mode, no BPF filter: 2,149 packets, 1,806 management frames, 269 action frames in 15 seconds; no reported drops |
 | LDN advertisements | Zero candidate LDN/FRLG headers in that capture; Switch hosting state not yet confirmed |
-| Transmission, key installation, association, trading | Not yet demonstrated; transmission experiment prepared |
+| First raw-transmission attempt | `pcap_inject` accepted all 44 bytes without error; 1,551 packets received in 15 seconds, including 1,340 management and 255 action frames, no reported drops, zero matching probe responses |
+| Over-the-air transmission, key installation, association, trading | Not demonstrated; write acceptance alone is insufficient |
 
 The second capture establishes actual management/action-frame reception and
 channel selection. Channel, filtering, and promiscuous mode changed together,
@@ -242,6 +243,44 @@ An outgoing-request echo cannot count as a response. A matching response
 supports over-the-air transmission of this management frame; it does not
 establish CCMP data transmission or reliable LDN operation. Zero responses
 can also result from frame rewriting, loss or access-point behavior.
+
+**First result:** the user ran the 44-byte random-source probe. The write
+returned 44, with an empty error string, but no matching response appeared.
+Reception continued normally (1,551 frames; 255 action frames). This proves
+write acceptance, not RF transmission, and does not prove injection impossible.
+
+The probe's basic layout was checked: eight-byte empty radiotap header,
+24-byte probe-request MAC header with broadcast destination/BSSID, zero-length
+SSID information element, and eight supported rates. New frame-construction
+tests independently walk its information elements and check addresses,
+sequence/fragment encoding, and total length.
+
+libpcap explicitly documents that some platforms/drivers rewrite the source
+address or link-layer type. The previous match against a fresh temporary
+address would miss a response addressed to the actual interface instead.
+This is a hypothesis to test, not an observation of N1 behavior.
+[pcap_inject documentation](https://www.tcpdump.org/manpages/pcap_inject.3pcap.html)
+
+A controlled comparison now permits the assigned interface address:
+
+```sh
+sudo ./build/macos-listen --interface en0 --seconds 15 --all-frames --channel 6 --probe-request --probe-source interface
+```
+
+This still sends only one ordinary request and needs a Wi-Fi reconnect
+afterward. `random` remains the default; specifying `--probe-source` without
+`--probe-request` is rejected. Neither mode prints the source address.
+Schema version 4 adds beacon/probe-request/probe-response counts, matching
+request echoes, responses to the assigned interface address, full-write
+status, the final channel, and interface-address change detection. Endpoints
+alone cannot exclude a temporary channel/address change during the capture.
+
+Do not treat local request echoes as RF proof. Responses to the interface
+address may also originate from normal macOS scanning, so those are weaker
+evidence than responses to a fresh random address. If this remains ambiguous,
+observe the test frame on a separate existing computer on the same channel.
+That receiver is experimental equipment, not a requirement for the proposed
+single-Mac trader.
 
 The source uses `pcap_inject`, the same interface used by OWL's macOS path.
 [OWL transmission code](https://github.com/seemoo-lab/owl/blob/master/daemon/io.c)

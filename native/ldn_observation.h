@@ -10,18 +10,39 @@
 typedef struct {
     bool management;
     bool action;
+    bool beacon;
+    bool probe_request;
+    bool probe_response;
     bool ldn_header;
     uint64_t communication_id;
 } LDNObservation;
 
+// Return a bounded 802.11 view, stripping only the capture metadata.
+static inline bool wifi_frame_view(const uint8_t **packet, size_t *size, bool radiotap) {
+    if (radiotap) {
+        if (*size < 8 || (*packet)[0] != 0) return false;
+        size_t length = (*packet)[2] | ((size_t)(*packet)[3] << 8);
+        if (length < 8 || length > *size) return false;
+        *packet += length; *size -= length;
+    }
+    return *size >= 24;
+}
+
+// An echo observed on the sending interface is not over-the-air evidence.
+// Match the complete body and addresses, tolerating only sequence/duration
+// changes. This counter deliberately does not guess at rewritten addresses.
+static inline bool observed_probe_request_echo(const uint8_t *packet, size_t size,
+        bool radiotap, const uint8_t *request, size_t request_size) {
+    if (!wifi_frame_view(&packet, &size, radiotap) || request_size < 24 || size < request_size)
+        return false;
+    return packet[0] == 0x40 && (packet[1] & 0xc7) == 0 &&
+        !memcmp(packet + 4, request + 4, 18) &&
+        !memcmp(packet + 24, request + 24, request_size - 24);
+}
+
 static inline bool observed_probe_response(const uint8_t *packet, size_t size,
         bool radiotap, const uint8_t destination[6]) {
-    if (radiotap) {
-        if (size < 8 || packet[0] != 0) return false;
-        size_t length = packet[2] | ((size_t)packet[3] << 8);
-        if (length < 8 || length > size) return false;
-        packet += length; size -= length;
-    }
+    if (!wifi_frame_view(&packet, &size, radiotap)) return false;
     // Probe responses have a 24-byte MAC header and 12 fixed body bytes.
     // Match the random source used only by this experiment, never local echoes
     // of the transmitted request (which has a different subtype).
@@ -31,15 +52,11 @@ static inline bool observed_probe_response(const uint8_t *packet, size_t size,
 
 static inline LDNObservation observe_ldn(const uint8_t *packet, size_t size, bool radiotap) {
     LDNObservation result = {0};
-    if (radiotap) {
-        if (size < 8 || packet[0] != 0) return result;
-        size_t length = packet[2] | ((size_t)packet[3] << 8);
-        if (length < 8 || length > size) return result;
-        packet += length;
-        size -= length;
-    }
-    if (size < 24 || (packet[0] & 0x0f) != 0) return result;
+    if (!wifi_frame_view(&packet, &size, radiotap) || (packet[0] & 0x0f) != 0) return result;
     result.management = true;
+    result.beacon = (packet[0] & 0xf0) == 0x80;
+    result.probe_request = (packet[0] & 0xf0) == 0x40;
+    result.probe_response = (packet[0] & 0xf0) == 0x50;
     if ((packet[0] & 0xf0) != 0xd0) return result;
     result.action = true;
     // Ignore encrypted or fragmented management bodies; they aren't headers.

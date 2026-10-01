@@ -11,7 +11,7 @@ build/macos-probe: native/macos_probe.m
 
 mac-listen: build/macos-listen
 
-build/macos-listen: native/macos_listen.m native/ldn_observation.h
+build/macos-listen: native/macos_listen.m native/ldn_observation.h native/probe_frame.h
 	mkdir -p build
 	xcrun clang -O2 -Wall -Wextra -Werror -fobjc-arc \
 		-framework Foundation -framework CoreWLAN -lpcap $< -o $@
@@ -19,6 +19,6 @@ build/macos-listen: native/macos_listen.m native/ldn_observation.h
 native-test: build/test-ldn-observation
 	./build/test-ldn-observation
 
-build/test-ldn-observation: tests/test_ldn_observation.c native/ldn_observation.h
+build/test-ldn-observation: tests/test_ldn_observation.c native/ldn_observation.h native/probe_frame.h
 	mkdir -p build
 	xcrun clang -Wall -Wextra -Werror -fsanitize=address,undefined $< -o $@

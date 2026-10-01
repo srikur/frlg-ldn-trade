@@ -24,8 +24,10 @@ trading individual `.pk3` files from an existing computer.
    read-only probe builds with `make mac-probe`, and a separate bounded passive
    listener with `make mac-listen`. CoreWLAN channel selection and actual
    management/action reception now work on this Mac: one 15-second capture
-   delivered 2,149 packets, including 269 action frames. LDN discovery,
-   transmission and private key-control access remain unproven.
+   delivered 2,149 packets, including 269 action frames. A subsequent injection
+   call accepted a 44-byte probe request, but no matching response was observed.
+   LDN discovery, over-the-air transmission and private key-control access
+   remain unproven.
    [Native Mac evidence and experiments](NATIVE_MAC.md)
 
 4. **Windows alternatives do not establish built-in-radio support.** The

@@ -5,12 +5,15 @@
 #import <Foundation/Foundation.h>
 #import <CoreWLAN/CoreWLAN.h>
 #include <math.h>
+#include <ifaddrs.h>
 #include <net/if.h>
+#include <net/if_dl.h>
 #include <pcap/pcap.h>
 #include <signal.h>
 #include <time.h>
 #include <unistd.h>
 #include "ldn_observation.h"
+#include "probe_frame.h"
 
 static volatile sig_atomic_t interrupted = 0;
 static void stopListening(int signalNumber) { (void)signalNumber; interrupted = 1; }
@@ -19,14 +22,32 @@ static double now(void) {
     clock_gettime(CLOCK_MONOTONIC, &value);
     return value.tv_sec + value.tv_nsec / 1e9;
 }
+static BOOL interfaceAddress(const char *name, uint8_t address[6]) {
+    struct ifaddrs *interfaces = NULL;
+    if (getifaddrs(&interfaces) != 0) return NO;
+    BOOL found = NO;
+    for (struct ifaddrs *entry = interfaces; entry; entry = entry->ifa_next) {
+        if (!entry->ifa_addr || entry->ifa_addr->sa_family != AF_LINK || strcmp(entry->ifa_name, name)) continue;
+        const struct sockaddr_dl *link = (const struct sockaddr_dl *)entry->ifa_addr;
+        if (link->sdl_alen != 6 || link->sdl_len < offsetof(struct sockaddr_dl, sdl_data) + link->sdl_nlen + 6) continue;
+        memcpy(address, link->sdl_data + link->sdl_nlen, 6);
+        static const uint8_t zero[6] = {0};
+        found = !(address[0] & 1) && memcmp(address, zero, 6);
+        if (found) break;
+    }
+    freeifaddrs(interfaces);
+    return found;
+}
 static void usage(FILE *out) {
-    fprintf(out, "Usage: macos-listen [--interface en0] [--seconds 15] [--all-frames] [--channel 6] [--probe-request]\n"
+    fprintf(out, "Usage: macos-listen [--interface en0] [--seconds 15] [--all-frames] [--channel 6]\n"
+        "                    [--probe-request [--probe-source random|interface]]\n"
         "       macos-listen --offline file.pcap\n"
         "Live mode enables promiscuous monitor capture for 1-60 seconds.\n"
         "It may interrupt ordinary Wi-Fi. --channel explicitly disconnects first\n"
         "and tunes to a supported 2.4 GHz channel. Reconnect Wi-Fi afterward.\n"
         "--all-frames counts all frame types instead of filtering for management.\n"
         "--probe-request sends ONE wildcard probe request and counts matching replies.\n"
+        "--probe-source interface tests the current interface address instead of a random one.\n"
         "Only aggregate counts and public game IDs are printed; no packets saved.\n");
 }
 
@@ -37,6 +58,8 @@ int main(int argc, const char **argv) {
         NSInteger requestedChannel = 0;
         BOOL allFrames = NO;
         BOOL probeRequest = NO;
+        const char *probeSourceMode = "random";
+        BOOL sourceOption = NO;
         BOOL liveOption = NO;
         for (int i = 1; i < argc; ++i) {
             if (!strcmp(argv[i], "--interface") && i + 1 < argc) {
@@ -45,6 +68,11 @@ int main(int argc, const char **argv) {
                 allFrames = YES; liveOption = YES;
             } else if (!strcmp(argv[i], "--probe-request")) {
                 probeRequest = YES; liveOption = YES;
+            } else if (!strcmp(argv[i], "--probe-source") && i + 1 < argc) {
+                probeSourceMode = argv[++i]; sourceOption = YES; liveOption = YES;
+                if (strcmp(probeSourceMode, "random") && strcmp(probeSourceMode, "interface")) {
+                    usage(stderr); return 64;
+                }
             } else if (!strcmp(argv[i], "--channel") && i + 1 < argc) {
                 char *end = NULL;
                 requestedChannel = strtol(argv[++i], &end, 10); liveOption = YES;
@@ -61,7 +89,7 @@ int main(int argc, const char **argv) {
             else if (!strcmp(argv[i], "--help")) { usage(stdout); return 0; }
             else { usage(stderr); return 64; }
         }
-        if ((offline && liveOption) || !*interface || strlen(interface) >= IFNAMSIZ) {
+        if ((offline && liveOption) || (sourceOption && !probeRequest) || !*interface || strlen(interface) >= IFNAMSIZ) {
             usage(stderr); return 64;
         }
         for (const char *p = interface; *p; ++p)
@@ -140,29 +168,31 @@ int main(int argc, const char **argv) {
             pcap_close(handle); return 2;
         }
         uint64_t packets = 0, management = 0, actions = 0, advertisements = 0, frlg = 0;
+        uint64_t beacons = 0, allProbeRequests = 0, allProbeResponses = 0, requestEchoes = 0;
         uint64_t probeResponses = 0;
         uint8_t probeSource[6] = {0};
+        uint8_t interfaceSource[6] = {0};
+        BOOL haveInterfaceSource = !offline && interfaceAddress(interface, interfaceSource);
+        uint64_t interfaceResponses = 0;
+        uint8_t request[PROBE_REQUEST_SIZE] = {0};
         int injectedBytes = 0;
         size_t injectionSize = 0;
         NSString *injectionError = @"";
         if (probeRequest) {
-            // Radiotap (empty fields), broadcast probe request, wildcard SSID,
-            // supported rates. A fresh local/unicast address distinguishes any
-            // response from background scanning. No address is printed.
-            uint8_t request[44] = {0};
-            request[2] = 8;
-            request[8] = 0x40;
-            memset(request + 12, 0xff, 6);
-            memset(request + 24, 0xff, 6);
-            arc4random_buf(probeSource, sizeof(probeSource));
-            probeSource[0] = (probeSource[0] & 0xfc) | 0x02;
-            memcpy(request + 18, probeSource, 6);
-            // Offsets 32/33 encode a zero-length SSID IE.
-            const uint8_t rates[] = {1, 8, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24};
-            memcpy(request + 34, rates, sizeof(rates));
-            size_t offset = datalink == DLT_IEEE802_11_RADIO ? 0 : 8;
+            if (!strcmp(probeSourceMode, "interface")) {
+                if (!haveInterfaceSource) {
+                    fprintf(stderr, "Cannot read the assigned interface address; no packet injected.\n");
+                    pcap_close(handle); return 2;
+                }
+                memcpy(probeSource, interfaceSource, 6);
+            } else {
+                arc4random_buf(probeSource, sizeof(probeSource));
+                probeSource[0] = (probeSource[0] & 0xfc) | 0x02;
+            }
+            build_probe_request(request, probeSource, (uint16_t)arc4random_uniform(4096));
+            size_t offset = datalink == DLT_IEEE802_11_RADIO ? 0 : PROBE_RADIOTAP_SIZE;
             injectionSize = sizeof(request) - offset;
-            fprintf(stderr, "Sending one wildcard Wi-Fi probe request; a matching reply is required to confirm over-the-air transmission.\n");
+            fprintf(stderr, "Sending one wildcard Wi-Fi probe request using %s source mode. Write success and local echoes are not over-the-air evidence.\n", probeSourceMode);
             injectedBytes = pcap_inject(handle, request + offset, injectionSize);
             if (injectedBytes < 0) injectionError = @(pcap_geterr(handle));
         }
@@ -180,8 +210,16 @@ int main(int argc, const char **argv) {
             LDNObservation observed = observe_ldn(packet, header->caplen, datalink == DLT_IEEE802_11_RADIO);
             if (probeRequest && observed_probe_response(packet, header->caplen,
                     datalink == DLT_IEEE802_11_RADIO, probeSource)) ++probeResponses;
+            if (probeRequest && haveInterfaceSource && observed_probe_response(packet, header->caplen,
+                    datalink == DLT_IEEE802_11_RADIO, interfaceSource)) ++interfaceResponses;
+            if (probeRequest && observed_probe_request_echo(packet, header->caplen,
+                    datalink == DLT_IEEE802_11_RADIO, request + PROBE_RADIOTAP_SIZE,
+                    sizeof(request) - PROBE_RADIOTAP_SIZE)) ++requestEchoes;
             management += observed.management;
             actions += observed.action;
+            beacons += observed.beacon;
+            allProbeRequests += observed.probe_request;
+            allProbeResponses += observed.probe_response;
             if (observed.ldn_header) {
                 ++advertisements;
                 frlg += observed.communication_id == UINT64_C(0x0100610011000000);
@@ -191,6 +229,9 @@ int main(int argc, const char **argv) {
             }
         }
         double elapsed = now() - start;
+        NSInteger channelAtEnd = wifi.wlanChannel.channelNumber;
+        uint8_t interfaceAtEnd[6] = {0};
+        BOOL readableAtEnd = !offline && interfaceAddress(interface, interfaceAtEnd);
         NSMutableDictionary *captureStats = [NSMutableDictionary dictionary];
         struct pcap_stat stats;
         if (!offline && pcap_stats(handle, &stats) == 0) {
@@ -200,24 +241,33 @@ int main(int argc, const char **argv) {
         }
         pcap_close(handle); // Also on Ctrl-C/error: release the capture handle.
         NSDictionary *report = @{
-            @"schema_version": @3,
+            @"schema_version": @4,
             @"mode": offline ? @"offline" : probeRequest ? @"live_probe_request" : @"live_passive",
             @"filter": offline || allFrames ? @"none" : @"management",
             @"promiscuous_requested": @(!offline),
             @"requested_2ghz_channel": @(requestedChannel),
             @"channel_before": @(channelBefore), @"channel_at_start": @(channelAtStart),
+            @"channel_at_end": @(channelAtEnd),
             @"pcap_stats": captureStats,
             @"datalink": @(datalink), @"elapsed_seconds": @(elapsed),
             @"interrupted": @(interrupted != 0), @"read_error": @(failed),
             @"packets_examined": @(packets), @"management_frames": @(management),
+            @"beacon_frames": @(beacons), @"probe_request_frames": @(allProbeRequests),
+            @"probe_response_frames": @(allProbeResponses),
             @"action_frames": @(actions), @"ldn_header_candidates": @(advertisements),
             @"frlg_header_candidates": @(frlg), @"communication_id_counts": gameIDs,
             @"transmission_tested": @(probeRequest), @"ldn_compatibility": @"unproven",
             @"probe_request": @{
                 @"attempted": @(probeRequest), @"bytes_requested": @(injectionSize),
+                @"source_mode": @(probeSourceMode),
                 @"write_result": @(injectedBytes), @"error": injectionError,
+                @"full_write": @(probeRequest && injectedBytes >= 0 && (size_t)injectedBytes == injectionSize),
                 @"matching_responses": @(probeResponses),
-                @"interpretation": @"A matching response supports transmission of this management frame only. No response is inconclusive even if the write succeeds."
+                @"request_echoes": @(requestEchoes),
+                @"responses_to_interface_address": @(interfaceResponses),
+                @"interface_address_readable": @(haveInterfaceSource),
+                @"interface_address_changed": haveInterfaceSource && readableAtEnd ? @(memcmp(interfaceSource, interfaceAtEnd, 6) != 0) : NSNull.null,
+                @"interpretation": @"Writes and local echoes do not establish RF transmission. Responses to the interface address can be from OS scanning. A separate receiver provides stronger evidence."
             },
             @"interpretation": @"Headers are unauthenticated. Zero matches can mean the wrong channel, no host, or no usable reception."
         };
@@ -225,6 +275,7 @@ int main(int argc, const char **argv) {
             options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
         if (!json) return 2;
         fwrite(json.bytes, 1, json.length, stdout); fputc('\n', stdout);
-        return failed || injectedBytes < 0 ? 2 : 0;
+        BOOL incompleteWrite = probeRequest && (injectedBytes < 0 || (size_t)injectedBytes != injectionSize);
+        return failed || incompleteWrite ? 2 : 0;
     }
 }
