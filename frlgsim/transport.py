@@ -283,8 +283,9 @@ class LiveTransport:
     """Join the console's LDN session and exchange UDP :12345 datagrams. Mirrors the bridge
     (scan/connect + UDP TX socket + AF_PACKET RX). Untested offline."""
 
-    # FRLG LDN identity (the same the bridge/console use).
-    LOCAL_COMMUNICATION_ID = 0x0100610011000000     # FireRed/LeafGreen emulator title id
+    # Observed from a hosted FireRed session on Switch 2. Communication IDs
+    # can be shared across editions; this is not a language identifier.
+    LOCAL_COMMUNICATION_ID = 0x01006FA0233F8000
     SCENE_ID = 0
     APPLICATION_VERSION = 88     # the LDN participant app_version a native FRLG station advertises (0x58)
 

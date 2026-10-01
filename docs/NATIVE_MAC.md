@@ -2,10 +2,12 @@
 
 Investigated 2026-10-01. Goal: use the Mac's existing Wi-Fi to trade `.pk3`
 files with an unmodified Switch 2 running FireRed. No ESP32, USB radio, or
-Linux installation. **Native channel selection and action-frame reception are
-now demonstrated on this N1 Mac. No LDN connection or trade has been proven.**
+Linux installation. **Native channel selection and reception of public LDN
+headers matching a FireRed ID are demonstrated on this N1 Mac. No encrypted
+LDN connection or trade has been proven.**
 Only this Mac is currently available; the next experiment uses the Switch
-itself as the known nearby host, without a second receiver.
+itself as the nearby peer, without a second receiver. The user confirmed
+that the running FireRed edition is English.
 
 ## The most useful finding
 
@@ -73,6 +75,8 @@ These are local measurements, not compatibility claims for all Macs.
 | First raw-transmission attempt | `pcap_inject` accepted all 44 bytes without error; 1,551 packets received in 15 seconds, including 1,340 management and 255 action frames, no reported drops, zero matching probe responses |
 | Interface-source comparison | 44/44 bytes accepted again; 1,485 packets, 1,255 management frames, 313 actions, 833 beacons, 23 probe requests and 68 probe responses; zero matching responses, interface-address responses or request echoes; no reported drops |
 | Comparison channel/address checks | Channel 6 at both capture endpoints; assigned interface address readable and unchanged at the endpoints |
+| Completed three-channel sweep, FireRed hosting | Channels 1/6/11 received 1,494/2,022/1,832 packets. Channel 6 contained 139 candidate LDN headers with ID `0x01006fa0233f8000`; none on 1 or 11. No reported drops; requested channels matched start/end readings |
+| Initial FRLG label for that sweep | Incorrectly reported zero because it compared only against inherited ID `0x0100610011000000`. The public ID was decoded correctly; the classification/default has now been corrected |
 | Private bind diagnosis, ordinary user outside sandbox | Saved errno 102 (`Operation not supported on socket`); process logs report a missing Wi-Fi DriverKit entitlement, failed `IOServiceOpen` (`0xe00002bc`), and a failed legacy IOCTL fallback |
 | Over-the-air transmission, key installation, association, trading | Not demonstrated; write acceptance alone is insufficient |
 
@@ -170,10 +174,10 @@ explains why even this non-activating query needs BPF permissions.
 ## Next experiments and success criteria
 
 1. **Completed:** administrator monitor query returns 1 on this N1 Mac.
-2. **Partly completed:** general management/action reception works. Next test
-   Nintendo advertisements while the Switch hosts a room, on channels 1, 6,
-   and 11 as needed. Header recognition does not need keys. Selecting monitor
-   mode/channel may interrupt the Mac's ordinary Wi-Fi.
+2. **Completed at the public-header level:** the hosted-room sweep received
+   139 LDN header candidates on channel 6. Their ID matches a published
+   FireRed application ID. Headers remain unauthenticated; this is not
+   advertisement decryption or room entry.
 3. Investigate native association/key control first. Determine the current
    Apple80211/DriverKit call path and permissions, and whether it permits
    manual traffic keys and concurrent advertisement reception. The read-only
@@ -251,10 +255,11 @@ The capture handle closes before advancing to another channel. An error stops
 the sweep and marks it incomplete; Ctrl-C reports the partial results and exits
 with status 130. Channel-selection overhead is additional to the capture time.
 
-`--ldn-sweep` cannot be combined with `--channel`, `--probe-request`, or
-`--offline`. Sweep schema 1 wraps the unchanged single-capture schema 4.
-The sweep has compiled and passed offline argument/report checks; live
-multi-channel discovery is still awaiting a hosted-room experiment.
+`--ldn-sweep` cannot be combined with `--channel`, `--probe-request`,
+`--auth-request`, or `--offline`. Current sweep schema 2 wraps single-capture
+schema 5 and reports both the FRLG match ID and an independently selectable
+target ID (`--comm-id HEX`). The completed live sweep used the earlier schema
+1/4 combination, before the FRLG ID correction described below.
 
 The first live sweep attempt crashed after the first channel, before emitting
 JSON. The local macOS crash report showed `objc_retain` inside `listenOnce`.
@@ -264,19 +269,46 @@ pool. The output parameter now explicitly retains into the caller's strong
 slot. `make native-test` exercises three successive offline captures, retained
 nested reports, and JSON serialization under AddressSanitizer/UBSan. The sweep
 also prints a completion line for each channel. The failed run provides no
-LDN discovery result; the corrected live sweep still needs to be run.
+LDN discovery result; the corrected live sweep subsequently completed with
+the results recorded in the table above.
 
 Interpretation:
 
 - `management_frames > 0` establishes management-frame delivery to this
   process. `action_frames > 0` also demonstrates action-frame reception.
 - `frlg_header_candidates > 0` means an observed header contains the expected
-  FRLG communication ID `0x0100610011000000`. Headers are **unauthenticated**:
+  locally observed FRLG communication ID `0x01006fa0233f8000`. Headers are **unauthenticated**:
   this cannot establish successful advertisement decryption or room entry.
 - Zero FRLG matches can mean a different channel, no host advertisement, or
   unusable reception. Even zero management frames requires checking channel,
   nearby activity, capture configuration, and driver behavior before drawing
   a hardware conclusion.
+
+### Correcting the communication ID
+
+The completed sweep decoded 139 advertisements with ID
+`0x01006fa0233f8000`. The tool's original `frlg_header_candidates` check used
+upstream's constant `0x0100610011000000`, so it falsely labeled those as zero
+FRLG matches. Checking the big-endian advertisement layout in kinnay's encoder
+confirmed the offset and byte order; this was an overly narrow ID check, not
+a missed packet or a decoder endian error.
+[Advertisement encoder](https://github.com/kinnay/LDN/blob/master/ldn/__init__.py),
+[Inherited transport default](https://github.com/tornadus/frlg-ldn-trade/blob/main/frlgsim/transport.py)
+
+Ruimusume's own tool documentation lists the observed value as the Japanese
+FireRed **application title ID**. The user is running English FireRed. A
+network communication ID need not identify the installed language edition;
+the capture is consistent with a shared identifier, but does not establish
+every edition's behavior or cryptographically identify the transmitter.
+[Tool author's version table](https://gbatemp.net/threads/switch-pokemon-fire-red-leaf-green-jp-en-nsce-cheats-tools.680562/)
+
+The native diagnostic and the Linux trader's default now use the observed ID.
+The trader's existing `--comm-id` override remains available. The native
+listener also accepts `--comm-id` and separately reports
+`target_communication_id` / `target_header_candidates`; choosing a target
+never relabels arbitrary IDs as FRLG. The detector does not infer language
+from these fields. An offline fixture with the captured ID now covers its
+classification, and the existing sweep report-lifetime regression still runs.
 
 The Nintendo vendor/LDN signature and network identifier are outside the
 encrypted advertisement payload. The minimal parser checks those public fields
@@ -370,9 +402,9 @@ inspection of published code is not a trace of this N1 driver's execution.
 [XNU BPF write path](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/net/bpf.c)
 
 A separate receiver could help diagnose injection, but none is available now.
-The next experiment instead looks for the Switch's own LDN advertisements
-across the default channels. Discovery would identify a relevant peer/channel;
-it would still establish reception only, not transmission or a trade.
+The completed sweep instead found a relevant advertiser on channel 6. That
+provides a peer for the following targeted test; reception alone still does
+not establish transmission or a trade.
 
 The source uses `pcap_inject`, the same interface used by OWL's macOS path.
 [OWL transmission code](https://github.com/seemoo-lab/owl/blob/master/daemon/io.c)
@@ -380,6 +412,51 @@ The source uses `pcap_inject`, the same interface used by OWL's macOS path.
 The parser's sanitized tests include truncated responses, destination matching,
 and rejection of outgoing request echoes. Offline mode rejects all live-only
 options, including `--probe-request`.
+
+## One targeted authentication request
+
+`--auth-request` waits for an advertisement matching an explicitly supplied
+`--comm-id`, learns its unicast transmitter address, and sends **one**
+open-system 802.11 authentication request to it using the Mac's assigned
+interface address. It never retries or falls back to another game. The LDN
+library's managed client requests open-system Wi-Fi authentication before
+its separate encrypted LDN exchange; its software AP also implements this
+request/response exchange. A retail Switch reply is still an experiment.
+[LDN wireless implementation](https://github.com/kinnay/LDN/blob/master/ldn/wlan.py)
+
+Keep FireRed waiting at **Direct Corner → Trade Center → Become Leader**:
+
+```sh
+sudo ./build/macos-listen --interface en0 --channel 6 --seconds 15 --all-frames --comm-id 0x01006fa0233f8000 --auth-request
+```
+
+This disconnects ordinary Wi-Fi; reconnect afterward. No keys are needed.
+It sends no association request, encrypted LDN authentication, or Pokémon
+data. The Nintendo advertisement uses a broadcast BSSID; the unicast
+transmitter supplies the target for this experiment. No addresses are printed
+or saved. Without `--auth-request` or `--probe-request`, capture stays passive.
+
+The JSON's `auth_request` reports whether a matching advertiser was found and
+a write attempted, requested/written byte counts, matching replies, and their
+status-code counts. Replies must be captured after the write begins, addressed
+to the Mac, from the selected peer/BSSID, with open-system algorithm 0 and
+transaction sequence 2. Request echoes, other peers and earlier buffered
+packets do not count.
+
+- A matching peer reply supports over-the-air transmission of this management
+  frame. A refusal status is still a reply; status 0 means only this basic
+  Wi-Fi authentication step succeeded, not LDN authentication or room entry.
+- A full write with no reply remains inconclusive. A single request can be
+  lost or ignored; it does not prove hardware incompatibility.
+- No suitable advertiser means no request is sent (`attempted: false`).
+  That and an incomplete write exit with status 2. Exit 0 means the experiment
+  completed, not that a response or a trade succeeded.
+
+This option requires both an explicit channel and communication ID, and is
+mutually exclusive with probe injection, sweep and offline modes. Frame,
+peer-selection and response-matching tests run with ASan/UBSan; CLI checks
+cover conflicting options and the unchanged passive offline path. Live
+transmission remains unproven until the peer experiment supplies evidence.
 
 ## Related work and limits
 

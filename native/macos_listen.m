@@ -1,6 +1,7 @@
 // Bounded passive reception experiment. Monitor mode may interrupt normal Wi-Fi.
 // Optional --channel disconnects Wi-Fi and selects a supported 2.4 GHz channel.
 // --probe-request explicitly sends one ordinary wildcard Wi-Fi probe request.
+// --auth-request sends one open-system auth request to a selected LDN advertiser.
 // Otherwise reception only. No decryption, keys, or packet-file output.
 #import <Foundation/Foundation.h>
 #import <CoreWLAN/CoreWLAN.h>
@@ -10,10 +11,12 @@
 #include <net/if_dl.h>
 #include <pcap/pcap.h>
 #include <signal.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 #include "ldn_observation.h"
 #include "probe_frame.h"
+#include "auth_frame.h"
 
 static volatile sig_atomic_t interrupted = 0;
 static void stopListening(int signalNumber) { (void)signalNumber; interrupted = 1; }
@@ -41,6 +44,8 @@ static BOOL interfaceAddress(const char *name, uint8_t address[6]) {
 static void usage(FILE *out) {
     fprintf(out, "Usage: macos-listen [--interface en0] [--seconds 15] [--all-frames] [--channel 6]\n"
         "                    [--probe-request [--probe-source random|interface]]\n"
+        "                    [--comm-id HEX]\n"
+        "       macos-listen --auth-request --channel N --comm-id HEX [--seconds 15] [--all-frames]\n"
         "       macos-listen --ldn-sweep [--interface en0] [--seconds 15] [--all-frames]\n"
         "       macos-listen --offline file.pcap\n"
         "Live mode enables promiscuous monitor capture for 1-60 seconds.\n"
@@ -49,8 +54,11 @@ static void usage(FILE *out) {
         "--all-frames counts all frame types instead of filtering for management.\n"
         "--probe-request sends ONE wildcard probe request and counts matching replies.\n"
         "--probe-source interface tests the current interface address instead of a random one.\n"
+        "--comm-id selects a target header counter (also supported offline).\n"
+        "--auth-request waits for that ID, then sends ONE open-system Wi-Fi auth request.\n"
+        "It uses the assigned interface address; no association, keys, or game traffic.\n"
         "--ldn-sweep listens on 2.4 GHz channels 1, 6, 11 for --seconds EACH.\n"
-        "It cannot be combined with --channel, --probe-request, or --offline.\n"
+        "It cannot be combined with --channel, --probe-request, --auth-request, or --offline.\n"
         "Only aggregate counts and public game IDs are printed; no packets saved.\n");
 }
 
@@ -73,6 +81,8 @@ static int listenOnce(int argc, const char **argv, NSDictionary *__strong *outpu
         BOOL allFrames = NO;
         BOOL sweep = NO;
         BOOL probeRequest = NO;
+        BOOL authRequest = NO, commIDOption = NO;
+        uint64_t targetCommID = FRLG_COMMUNICATION_ID;
         const char *probeSourceMode = "random";
         BOOL sourceOption = NO;
         BOOL liveOption = NO;
@@ -85,6 +95,15 @@ static int listenOnce(int argc, const char **argv, NSDictionary *__strong *outpu
                 sweep = YES; liveOption = YES;
             } else if (!strcmp(argv[i], "--probe-request")) {
                 probeRequest = YES; liveOption = YES;
+            } else if (!strcmp(argv[i], "--auth-request")) {
+                authRequest = YES; liveOption = YES;
+            } else if (!strcmp(argv[i], "--comm-id") && i + 1 < argc) {
+                const char *digits = argv[++i];
+                if (!strncmp(digits, "0x", 2) || !strncmp(digits, "0X", 2)) digits += 2;
+                if (!*digits || strlen(digits) > 16 || strspn(digits, "0123456789abcdefABCDEF") != strlen(digits)) {
+                    usage(stderr); return 64;
+                }
+                targetCommID = strtoull(digits, NULL, 16); commIDOption = YES;
             } else if (!strcmp(argv[i], "--probe-source") && i + 1 < argc) {
                 probeSourceMode = argv[++i]; sourceOption = YES; liveOption = YES;
                 if (strcmp(probeSourceMode, "random") && strcmp(probeSourceMode, "interface")) {
@@ -107,7 +126,9 @@ static int listenOnce(int argc, const char **argv, NSDictionary *__strong *outpu
             else { usage(stderr); return 64; }
         }
         if ((offline && liveOption) || (sourceOption && !probeRequest) ||
-                (sweep && (requestedChannel || probeRequest)) || !*interface || strlen(interface) >= IFNAMSIZ) {
+                (sweep && (requestedChannel || probeRequest || authRequest)) ||
+                (authRequest && (probeRequest || !requestedChannel || !commIDOption)) ||
+                !*interface || strlen(interface) >= IFNAMSIZ) {
             usage(stderr); return 64;
         }
         for (const char *p = interface; *p; ++p)
@@ -116,27 +137,30 @@ static int listenOnce(int argc, const char **argv, NSDictionary *__strong *outpu
             }
         signal(SIGINT, stopListening);
         signal(SIGTERM, stopListening);
+        NSString *targetID = [NSString stringWithFormat:@"0x%016llx", (unsigned long long)targetCommID];
         if (sweep) {
             // Reuse the tested capture path. Each channel's BPF handle closes
             // before the next channel is selected, including on error/Ctrl-C.
             const char *channels[] = {"1", "6", "11"};
             NSString *duration = [NSString stringWithFormat:@"%.17g", seconds];
             const char *channelArgs[] = {argv[0], "--interface", interface,
-                "--seconds", duration.UTF8String, "--channel", NULL, "--all-frames", NULL};
+                "--seconds", duration.UTF8String, "--channel", NULL,
+                "--comm-id", targetID.UTF8String, "--all-frames", NULL};
             NSMutableArray *results = [NSMutableArray array];
-            uint64_t totalLDN = 0, totalFRLG = 0;
+            uint64_t totalLDN = 0, totalFRLG = 0, totalTarget = 0;
             int status = 0;
             fprintf(stderr, "Listening on channels 1, 6 and 11 for %.0f seconds each. Keep the Switch hosting throughout; reconnect Wi-Fi afterward.\n", seconds);
             for (unsigned i = 0; i < 3 && !interrupted; ++i) {
                 channelArgs[6] = channels[i];
                 NSDictionary *report = nil;
-                status = listenOnce(allFrames ? 8 : 7, channelArgs, &report);
+                status = listenOnce(allFrames ? 10 : 9, channelArgs, &report);
                 NSMutableDictionary *result = [@{@"requested_2ghz_channel": @(atoi(channels[i])),
                     @"exit_status": @(status)} mutableCopy];
                 if (report) {
                     result[@"capture"] = report;
                     totalLDN += [report[@"ldn_header_candidates"] unsignedLongLongValue];
                     totalFRLG += [report[@"frlg_header_candidates"] unsignedLongLongValue];
+                    totalTarget += [report[@"target_header_candidates"] unsignedLongLongValue];
                     fprintf(stderr, "Channel %s finished: %llu packets, %llu FRLG header candidates.\n",
                         channels[i], [report[@"packets_examined"] unsignedLongLongValue],
                         [report[@"frlg_header_candidates"] unsignedLongLongValue]);
@@ -146,7 +170,9 @@ static int listenOnce(int argc, const char **argv, NSDictionary *__strong *outpu
             }
             BOOL complete = status == 0 && !interrupted && results.count == 3;
             NSDictionary *report = @{
-                @"schema_version": @1, @"mode": @"live_passive_sweep",
+                @"schema_version": @2, @"mode": @"live_passive_sweep",
+                @"frlg_communication_id": [NSString stringWithFormat:@"0x%016llx", (unsigned long long)FRLG_COMMUNICATION_ID],
+                @"target_communication_id": targetID, @"target_header_candidates": @(totalTarget),
                 @"requested_channels": @[@1, @6, @11], @"seconds_per_channel": @(seconds),
                 @"results": results, @"complete": @(complete), @"interrupted": @(interrupted != 0),
                 @"ldn_header_candidates": @(totalLDN), @"frlg_header_candidates": @(totalFRLG),
@@ -231,6 +257,18 @@ static int listenOnce(int argc, const char **argv, NSDictionary *__strong *outpu
         uint8_t probeSource[6] = {0};
         uint8_t interfaceSource[6] = {0};
         BOOL haveInterfaceSource = !offline && interfaceAddress(interface, interfaceSource);
+        if (authRequest && !haveInterfaceSource) {
+            fprintf(stderr, "Cannot read the assigned interface address; no authentication request sent.\n");
+            pcap_close(handle); return 2;
+        }
+        uint64_t targetHeaders = 0, authResponses = 0;
+        uint8_t authPeer[6] = {0};
+        BOOL authAttempted = NO;
+        int authWrite = 0;
+        size_t authSize = 0;
+        NSString *authError = @"";
+        struct timeval authSentAt = {0};
+        NSMutableDictionary *authStatuses = [NSMutableDictionary dictionary];
         uint64_t interfaceResponses = 0;
         uint8_t request[PROBE_REQUEST_SIZE] = {0};
         int injectedBytes = 0;
@@ -266,6 +304,16 @@ static int listenOnce(int argc, const char **argv, NSDictionary *__strong *outpu
             if (code == 0) { usleep(10000); continue; }
             ++packets;
             LDNObservation observed = observe_ldn(packet, header->caplen, datalink == DLT_IEEE802_11_RADIO);
+            uint16_t authStatus = 0;
+            BOOL afterAuthWrite = authAttempted && (header->ts.tv_sec > authSentAt.tv_sec ||
+                (header->ts.tv_sec == authSentAt.tv_sec && header->ts.tv_usec >= authSentAt.tv_usec));
+            if (afterAuthWrite && observed_auth_response(packet, header->caplen,
+                    datalink == DLT_IEEE802_11_RADIO, interfaceSource, authPeer, &authStatus)) {
+                ++authResponses;
+                NSString *key = [NSString stringWithFormat:@"%u", (unsigned)authStatus];
+                if (authStatuses[key] || authStatuses.count < 64)
+                    authStatuses[key] = @([authStatuses[key] unsignedLongLongValue] + 1);
+            }
             if (probeRequest && observed_probe_response(packet, header->caplen,
                     datalink == DLT_IEEE802_11_RADIO, probeSource)) ++probeResponses;
             if (probeRequest && haveInterfaceSource && observed_probe_response(packet, header->caplen,
@@ -280,10 +328,23 @@ static int listenOnce(int argc, const char **argv, NSDictionary *__strong *outpu
             allProbeResponses += observed.probe_response;
             if (observed.ldn_header) {
                 ++advertisements;
-                frlg += observed.communication_id == UINT64_C(0x0100610011000000);
+                frlg += observed.communication_id == FRLG_COMMUNICATION_ID;
+                targetHeaders += observed.communication_id == targetCommID;
                 NSString *gameID = [NSString stringWithFormat:@"0x%016llx", (unsigned long long)observed.communication_id];
                 if (gameIDs[gameID] || gameIDs.count < 64)
                     gameIDs[gameID] = @([gameIDs[gameID] unsignedLongLongValue] + 1);
+            }
+            if (authRequest && !authAttempted && observed_ldn_peer(packet, header->caplen,
+                    datalink == DLT_IEEE802_11_RADIO, targetCommID, authPeer)) {
+                uint8_t auth[AUTH_REQUEST_SIZE];
+                build_auth_request(auth, interfaceSource, authPeer, (uint16_t)arc4random_uniform(4096));
+                size_t offset = datalink == DLT_IEEE802_11_RADIO ? 0 : AUTH_RADIOTAP_SIZE;
+                authSize = sizeof(auth) - offset;
+                authAttempted = YES; // Never retry, even if the write fails.
+                fprintf(stderr, "Observed selected LDN ID; sending one open-system Wi-Fi authentication request.\n");
+                gettimeofday(&authSentAt, NULL);
+                authWrite = pcap_inject(handle, auth + offset, authSize);
+                if (authWrite < 0) authError = @(pcap_geterr(handle));
             }
         }
         double elapsed = now() - start;
@@ -299,8 +360,10 @@ static int listenOnce(int argc, const char **argv, NSDictionary *__strong *outpu
         }
         pcap_close(handle); // Also on Ctrl-C/error: release the capture handle.
         NSDictionary *report = @{
-            @"schema_version": @4,
-            @"mode": offline ? @"offline" : probeRequest ? @"live_probe_request" : @"live_passive",
+            @"schema_version": @5,
+            @"mode": offline ? @"offline" : authRequest ? @"live_auth_request" : probeRequest ? @"live_probe_request" : @"live_passive",
+            @"frlg_communication_id": [NSString stringWithFormat:@"0x%016llx", (unsigned long long)FRLG_COMMUNICATION_ID],
+            @"target_communication_id": targetID, @"target_header_candidates": @(targetHeaders),
             @"filter": offline || allFrames ? @"none" : @"management",
             @"promiscuous_requested": @(!offline),
             @"requested_2ghz_channel": @(requestedChannel),
@@ -314,7 +377,15 @@ static int listenOnce(int argc, const char **argv, NSDictionary *__strong *outpu
             @"probe_response_frames": @(allProbeResponses),
             @"action_frames": @(actions), @"ldn_header_candidates": @(advertisements),
             @"frlg_header_candidates": @(frlg), @"communication_id_counts": gameIDs,
-            @"transmission_tested": @(probeRequest), @"ldn_compatibility": @"unproven",
+            @"transmission_tested": @(probeRequest || authAttempted), @"ldn_compatibility": @"unproven",
+            @"auth_request": @{
+                @"requested": @(authRequest), @"attempted": @(authAttempted),
+                @"source_mode": @"interface", @"bytes_requested": @(authSize),
+                @"write_result": @(authWrite), @"error": authError,
+                @"full_write": @(authAttempted && authWrite >= 0 && (size_t)authWrite == authSize),
+                @"matching_responses": @(authResponses), @"status_counts": authStatuses,
+                @"interpretation": @"A matching peer reply supports transmission of this management frame only. Status 0 is open-system Wi-Fi authentication, not encrypted LDN authentication or a trade. No reply is inconclusive."
+            },
             @"probe_request": @{
                 @"attempted": @(probeRequest), @"bytes_requested": @(injectionSize),
                 @"source_mode": @(probeSourceMode),
@@ -331,7 +402,8 @@ static int listenOnce(int argc, const char **argv, NSDictionary *__strong *outpu
         };
         int jsonStatus = emitReport(report, output);
         BOOL incompleteWrite = probeRequest && (injectedBytes < 0 || (size_t)injectedBytes != injectionSize);
-        return failed || incompleteWrite ? 2 : jsonStatus;
+        BOOL incompleteAuth = authRequest && (!authAttempted || authWrite < 0 || (size_t)authWrite != authSize);
+        return failed || incompleteWrite || incompleteAuth ? 2 : jsonStatus;
     }
 }
 

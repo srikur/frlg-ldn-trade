@@ -20,7 +20,9 @@ int main(void) {
         frame[2] = 8;
         frame[8] = 0xd0;
         const uint8_t prefix[] = {0x7f, 0, 0x22, 0xaa, 4, 0, 1, 1};
-        const uint8_t game[] = {1, 0, 0x61, 0, 0x11, 0, 0, 0};
+        // ID from the user's successful hosted-room capture, independent of
+        // the production constant so a stale default fails this regression.
+        const uint8_t game[] = {1, 0, 0x6f, 0xa0, 0x23, 0x3f, 0x80, 0};
         memcpy(frame + 32, prefix, sizeof(prefix));
         memcpy(frame + 44, game, sizeof(game));
         frame[76] = 3;
@@ -44,7 +46,9 @@ int main(void) {
             assert([report[@"mode"] isEqualToString:@"offline"]);
             assert([report[@"packets_examined"] unsignedLongLongValue] == 1);
             assert([report[@"frlg_header_candidates"] unsignedLongLongValue] == 1);
-            assert([report[@"communication_id_counts"][@"0x0100610011000000"] unsignedLongLongValue] == 1);
+            assert([report[@"communication_id_counts"][@"0x01006fa0233f8000"] unsignedLongLongValue] == 1);
+            assert([report[@"target_header_candidates"] unsignedLongLongValue] == 1);
+            assert(![report[@"auth_request"][@"attempted"] boolValue]);
             assert(![report[@"transmission_tested"] boolValue]);
         }
         // Check that nested dictionaries survive and remain serializable too.

@@ -28,7 +28,10 @@ trading individual `.pk3` files from an existing computer.
    call accepted a 44-byte probe request, but no matching response was observed.
    A comparison using the interface's assigned address had the same outcome.
    The private Apple80211 bind logs a missing DriverKit entitlement and fails
-   both its driver connection and legacy fallback. LDN discovery, over-the-air
+   both its driver connection and legacy fallback. A completed native sweep
+   then received 139 public LDN header candidates on channel 6 while English
+   FireRed hosted a room. Their ID, `0x01006fa0233f8000`, corrects the inherited
+   default in the diagnostic and trader. Encrypted discovery, over-the-air
    transmission and usable key-control access remain unproven.
    [Native Mac evidence and experiments](NATIVE_MAC.md)
 
@@ -48,13 +51,13 @@ trading individual `.pk3` files from an existing computer.
 
 ## Next evidence needed
 
-The current experiment uses the Mac and Switch alone. Leave FireRed waiting
-at **Direct Corner → Trade Center → Become Leader**, then use the native
-listener's `--ldn-sweep --seconds 15 --all-frames` mode to listen on channels
-1, 6 and 11. This takes roughly 45 seconds, disconnects ordinary Wi-Fi, and
-needs no keys. It tests discovery only. See the native guide for the command
-and interpretation. Private driver access and actual transmission remain
-separate research tasks.
+The Mac-only sweep now establishes reception of candidate FireRed LDN headers
+on channel 6. The next experiment keeps FireRed waiting at **Direct Corner →
+Trade Center → Become Leader** and sends one ordinary Wi-Fi authentication
+request to that advertiser, looking for a matching response. It needs no keys
+and does not enter a room or initiate a Pokémon trade. See the native guide
+for `--auth-request`, its Wi-Fi interruption, and how to interpret the results.
+Private driver access and encrypted LDN communication remain separate tasks.
 
 Once keys and a suitable radio are available, test discovery, room entry, one
 disposable trade, graceful exit, and a save reload on the console. Then test a

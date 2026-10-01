@@ -7,6 +7,10 @@
 #include <stdint.h>
 #include <string.h>
 
+// Observed in a hosted FireRed session on the user's Switch 2 (2026-10-01).
+// A communication ID does not establish the game's language or authenticate it.
+#define FRLG_COMMUNICATION_ID UINT64_C(0x01006fa0233f8000)
+
 typedef struct {
     bool management;
     bool action;
