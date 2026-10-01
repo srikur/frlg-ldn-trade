@@ -14,6 +14,21 @@ typedef struct {
     uint64_t communication_id;
 } LDNObservation;
 
+static inline bool observed_probe_response(const uint8_t *packet, size_t size,
+        bool radiotap, const uint8_t destination[6]) {
+    if (radiotap) {
+        if (size < 8 || packet[0] != 0) return false;
+        size_t length = packet[2] | ((size_t)packet[3] << 8);
+        if (length < 8 || length > size) return false;
+        packet += length; size -= length;
+    }
+    // Probe responses have a 24-byte MAC header and 12 fixed body bytes.
+    // Match the random source used only by this experiment, never local echoes
+    // of the transmitted request (which has a different subtype).
+    return size >= 36 && packet[0] == 0x50 && (packet[1] & 0xc7) == 0 &&
+        (packet[22] & 0x0f) == 0 && !memcmp(packet + 4, destination, 6);
+}
+
 static inline LDNObservation observe_ldn(const uint8_t *packet, size_t size, bool radiotap) {
     LDNObservation result = {0};
     if (radiotap) {

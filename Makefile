@@ -14,7 +14,7 @@ mac-listen: build/macos-listen
 build/macos-listen: native/macos_listen.m native/ldn_observation.h
 	mkdir -p build
 	xcrun clang -O2 -Wall -Wextra -Werror -fobjc-arc \
-		-framework Foundation -lpcap $< -o $@
+		-framework Foundation -framework CoreWLAN -lpcap $< -o $@
 
 native-test: build/test-ldn-observation
 	./build/test-ldn-observation

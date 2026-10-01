@@ -2,7 +2,8 @@
 
 Investigated 2026-10-01. Goal: use the Mac's existing Wi-Fi to trade `.pk3`
 files with an unmodified Switch 2 running FireRed. No ESP32, USB radio, or
-Linux installation. **No native Mac trade or LDN connection has been proven.**
+Linux installation. **Native channel selection and action-frame reception are
+now demonstrated on this N1 Mac. No LDN connection or trade has been proven.**
 
 ## The most useful finding
 
@@ -64,10 +65,15 @@ These are local measurements, not compatibility claims for all Macs.
 | Monitor query, sandboxed | -1, BPF access: Operation not permitted |
 | Monitor query, ordinary user outside sandbox | -8, BPF access: Permission denied |
 | Administrator query | User ran the built probe in Terminal: `can_set_rfmon = 1`, no error. Monitor mode is advertised |
-| Capture, transmission, key installation, association, trading | Not attempted |
+| First capture | Radiotap link type 127 activated; 15 seconds, current channel, management filter, no promiscuous request: zero delivered packets |
+| Second capture | CoreWLAN selected channel 6 from channel 44; promiscuous mode, no BPF filter: 2,149 packets, 1,806 management frames, 269 action frames in 15 seconds; no reported drops |
+| LDN advertisements | Zero candidate LDN/FRLG headers in that capture; Switch hosting state not yet confirmed |
+| Transmission, key installation, association, trading | Not yet demonstrated; transmission experiment prepared |
 
-The administrator result clears the capability-advertisement gate. It does
-not yet prove actual reception, raw transmission, or key control.
+The second capture establishes actual management/action-frame reception and
+channel selection. Channel, filtering, and promiscuous mode changed together,
+so the result does not identify which change fixed the first empty capture.
+It does not establish transmission, LDN discovery, or key control.
 
 The installed Sunrise driver contains monitor and cipher-related strings, but
 it is **not the active driver on this Mac**. Those strings were discarded as
@@ -129,10 +135,10 @@ explains why even this non-activating query needs BPF permissions.
 ## Next experiments and success criteria
 
 1. **Completed:** administrator monitor query returns 1 on this N1 Mac.
-2. Test reception of Nintendo vendor action frames while the Switch hosts a
-   room. This can start without keys. A successful monitor query or an empty
-   capture is not proof of actual reception. Selecting monitor mode/channel
-   may interrupt the Mac's ordinary Wi-Fi; this is a separate experiment.
+2. **Partly completed:** general management/action reception works. Next test
+   Nintendo advertisements while the Switch hosts a room, on channels 1, 6,
+   and 11 as needed. Header recognition does not need keys. Selecting monitor
+   mode/channel may interrupt the Mac's ordinary Wi-Fi.
 3. Investigate native association/key control first. Determine the current
    Apple80211/DriverKit call path and permissions, and whether it permits
    manual traffic keys and concurrent advertisement reception. The read-only
@@ -153,8 +159,8 @@ would not remove the missing-keys prerequisite for trading.
 ## Passive listener
 
 This is a separate, opt-in experiment: unlike `macos-probe`, it enables monitor
-capture and may interrupt ordinary Wi-Fi. It uses the current channel without
-scanning or tuning. Run locally, not through a session relying on this Wi-Fi.
+capture and may interrupt ordinary Wi-Fi. It uses the current channel unless
+`--channel` is supplied. Run locally, not through a session relying on this Wi-Fi.
 Close other packet-capture programs first. The listener closes its handle after
 the requested duration, on Ctrl-C, or on a read error; reconnect Wi-Fi manually
 if the OS does not resume the connection.
@@ -165,10 +171,26 @@ sudo ./build/macos-listen --interface en0 --seconds 15
 ```
 
 Have the Switch host a FireRed trade room nearby if convenient. The listener
-uses a management-frame BPF filter, processes at most 256 bytes per packet,
+requests promiscuous mode, uses a management-frame BPF filter by default,
+processes at most 256 bytes per packet,
 and prints aggregate counts plus public communication IDs. It does not save
 captures, transmit, install keys, decrypt advertisements, or print addresses
 or SSIDs. The time limit accepts 1–60 seconds.
+
+The successful reception experiment used the following stronger configuration:
+
+```sh
+sudo ./build/macos-listen --interface en0 --seconds 15 --all-frames --channel 6
+```
+
+`--all-frames` removes the BPF filter, still retaining only aggregate counts.
+`--channel` accepts a supported 2.4 GHz channel (usually 1, 6 or 11 for these
+LDN experiments). It checks monitor access and channel availability, explicitly
+disassociates, then sets the channel through CoreWLAN. It does not remember or
+restore the previous network: reconnect Wi-Fi afterward. This mode reports
+the requested channel, CoreWLAN's channel readings, and pcap receive/drop stats.
+A channel value of zero means no readable value/no explicit selection, not a
+real Wi-Fi channel.
 
 Interpretation:
 
@@ -199,6 +221,34 @@ truncation, malformed radiotap lengths, encrypted/fragmented frames, other
 frame types, header controls, version/format checks and FRLG identification.
 An offline synthetic pcap also passed the complete pcap-to-JSON path. None of
 these tests establish over-the-air compatibility.
+
+## Explicit transmission experiment
+
+The optional `--probe-request` flag changes the listener into a transmission
+experiment. It sends **one** ordinary broadcast probe request with a wildcard
+SSID and a fresh locally administered source address, then counts probe
+responses addressed to that source. It needs no Switch or keys. The only
+injected frame is the probe request; the driver handles the normal Wi-Fi
+disconnection described above.
+
+```sh
+sudo ./build/macos-listen --interface en0 --seconds 15 --all-frames --channel 6 --probe-request
+```
+
+Reconnect Wi-Fi afterward. Without this explicit flag, the previous listening
+commands remain passive. The JSON reports the write return value and error
+separately from matching responses. A successful write alone is inconclusive.
+An outgoing-request echo cannot count as a response. A matching response
+supports over-the-air transmission of this management frame; it does not
+establish CCMP data transmission or reliable LDN operation. Zero responses
+can also result from frame rewriting, loss or access-point behavior.
+
+The source uses `pcap_inject`, the same interface used by OWL's macOS path.
+[OWL transmission code](https://github.com/seemoo-lab/owl/blob/master/daemon/io.c)
+
+The parser's sanitized tests include truncated responses, destination matching,
+and rejection of outgoing request echoes. Offline mode rejects all live-only
+options, including `--probe-request`.
 
 ## Related work and limits
 
