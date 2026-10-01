@@ -9,6 +9,15 @@ Only this Mac is currently available; the next experiment uses the Switch
 itself as the nearby peer, without a second receiver. The user confirmed
 that the running FireRed edition is English.
 
+**Current feasibility:** reception is demonstrated; native trading is not
+implemented. Two wildcard probe writes and one request to the detected LDN
+advertiser were accepted locally but produced no matching peer reply. The
+direct driver connection also fails, and the inspected public key setters
+cannot install the required CCMP traffic key. Further progress needs new
+evidence about a transmit/driver-control route; repeating the same captures
+does not resolve these gaps. This is not a proof that every native route is
+impossible.
+
 ## The most useful finding
 
 The Linux library's **joining** implementation uses a managed station. It asks
@@ -77,6 +86,7 @@ These are local measurements, not compatibility claims for all Macs.
 | Comparison channel/address checks | Channel 6 at both capture endpoints; assigned interface address readable and unchanged at the endpoints |
 | Completed three-channel sweep, FireRed hosting | Channels 1/6/11 received 1,494/2,022/1,832 packets. Channel 6 contained 139 candidate LDN headers with ID `0x01006fa0233f8000`; none on 1 or 11. No reported drops; requested channels matched start/end readings |
 | Initial FRLG label for that sweep | Incorrectly reported zero because it compared only against inherited ID `0x0100610011000000`. The public ID was decoded correctly; the classification/default has now been corrected |
+| Targeted authentication experiment | Channel 6, 15 seconds: 1,988 packets, 407 actions, 135 matching FireRed-ID headers, zero reported drops. One 38-byte request accepted in full with no error; zero matching authentication responses. Channel/address unchanged at endpoints |
 | Private bind diagnosis, ordinary user outside sandbox | Saved errno 102 (`Operation not supported on socket`); process logs report a missing Wi-Fi DriverKit entitlement, failed `IOServiceOpen` (`0xe00002bc`), and a failed legacy IOCTL fallback |
 | Over-the-air transmission, key installation, association, trading | Not demonstrated; write acceptance alone is insufficient |
 
@@ -109,6 +119,14 @@ obstacle for the direct Apple80211 route. The IOKit status is generic; these
 observations do not establish that entitlement is the only obstacle. The
 earlier root run also failed to bind, so sudo alone has not solved it.
 
+Apple Developer Technical Support has answered a report of this exact
+entitlement error: a third-party developer cannot obtain a provisioning
+profile authorizing an Apple-private entitlement. Consequently, adding this
+name to an entitlements plist is not a normal signing fix. Apple's suggested
+public CoreWLAN replacement in that discussion addresses Wi-Fi scanning; it
+does not promise arbitrary driver commands or LDN traffic-key installation.
+[Apple DTS response](https://developer.apple.com/forums/thread/756747)
+
 Probe schema 2 saves errno immediately after Bind. In the ordinary-user run
 outside the execution sandbox it was 102. This is consistent with the observed
 IOCTL fallback failure, not proof of missing radio capabilities. Private API
@@ -126,6 +144,39 @@ parameters, but no explicit static CCMP traffic-key setter in the inspected
 classes. This metadata check calls no setters and does not prove that a
 different mediated route is absent. A native-station implementation still
 needs a demonstrated way to install the LDN traffic keys.
+
+### Public key-setter implementation check
+
+Read-only inspection of the installed macOS 27.0 build 26A428 SDK and the
+arm64e `/usr/libexec/airportd` implementation further narrows the mediated
+route. No setter was invoked and no current network key was read or changed.
+
+- The SDK documents `setPairwiseMasterKey:error:` as a 32-byte PMK setter.
+  In `CWXPCSubsystem setPairwiseMasterKey:interfaceName:connection:error:`,
+  the installed service compares a non-nil key's length with `0x20` and takes
+  the error path for any other length. It submits cipher type 6 through
+  `Apple80211Set`; this does not expose an arbitrary cipher selector.
+- In `CWXPCSubsystem setWEPKey:flags:index:interfaceName:connection:error:`,
+  the service accepts a non-nil key only when its length is 5 or 13 bytes.
+  It chooses type 1 or 2 from that length before calling `Apple80211Set`.
+  The public `CWCipherKeyFlags` select unicast/multicast/transmit/receive use,
+  not the cipher algorithm. Supplying a 16-byte CCMP key cannot use this path.
+
+These observations establish restrictions of the inspected methods, not of
+all code in the service. They explain why ordinary association or a PMK/WEP
+setter cannot directly replace the Linux client's static traffic-key install.
+The comparison points in the inspected arm64e image are `0x10001CBB4` (PMK
+length), `0x10001D288` and `0x10001D298` (WEP lengths); virtual addresses may
+change in another OS build. The read-only inspection can be reproduced with:
+
+```sh
+xcrun dyld_info -disassemble /usr/libexec/airportd > /tmp/airportd-disassembly.txt
+rg -n 'CWXPCSubsystem setWEPKey:|CWXPCSubsystem setPairwiseMasterKey:' /tmp/airportd-disassembly.txt
+```
+
+This complements the installed `CoreWLAN.framework/Headers/CWInterface.h`
+and `CoreWLANTypes.h`, and the public API description.
+[CWInterface](https://developer.apple.com/documentation/corewlan/cwinterface)
 
 ## Reproduce the non-disruptive probe
 
@@ -184,9 +235,12 @@ explains why even this non-activating query needs BPF permissions.
    probe deliberately does not exercise setters on the current Wi-Fi session.
    The direct Apple80211 path now has an observed access/fallback failure;
    symbol presence alone is not a reason to proceed to arbitrary setters.
-4. If needed, test raw transmission independently. A successful local write
-   is insufficient: a peer response or a separate over-the-air observation is
-   needed, followed by sustained bidirectional traffic and ACK behavior.
+4. **Attempted, unresolved:** both wildcard probe tests and the targeted
+   authentication test accepted writes with zero matching replies. A local
+   write is insufficient. Before another live experiment, identify a specific
+   driver-send behavior or a concrete test defect that the new experiment can
+   distinguish. A positive result would still need sustained bidirectional
+   traffic and ACK behavior.
 5. With usable radio control and the required LDN key material, prove room
    discovery, LDN authentication, and Pia UDP exchange. Then integrate a Mac
    transport and test one disposable trade plus a console save reload before
@@ -457,6 +511,29 @@ mutually exclusive with probe injection, sweep and offline modes. Frame,
 peer-selection and response-matching tests run with ASan/UBSan; CLI checks
 cover conflicting options and the unchanged passive offline path. Live
 transmission remains unproven until the peer experiment supplies evidence.
+
+**Live result:** the Mac continued receiving the selected advertiser (135
+matching headers), attempted the request, and `pcap_inject` returned 38/38
+with no error. There were zero matching replies. The complete capture had
+1,988 packets, 407 action frames and 81 probe responses, with no reported
+drops. Channel 6 and the assigned interface address matched at both endpoints.
+Thus the experiment found a relevant peer but did not establish RF delivery
+or authentication success.
+
+A follow-up audit checked the authentication fields against kinnay's encoder:
+algorithm 0, transaction 1, status 0, destination/BSSID from the advertiser,
+and the assigned interface source. LDN action advertisements' broadcast BSSID
+is accepted during discovery; it is not used as the authentication destination.
+The response matcher expects transaction 2 and also accepts refusal statuses.
+No frame-layout defect was found. The published Darwin BPF implementation uses
+`microtime` capture timestamps, consistent with the wall-clock filter; this
+source check is not a runtime timestamp measurement on N1.
+
+The aggregate report cannot distinguish a driver discard from a lost/ignored
+request, a response not delivered to this capture, or unexpected rewriting.
+No full packet capture was saved for replay. Three accepted writes across
+these experiments therefore remain three inconclusive RF tests, not evidence
+that transmission works or a proof that it is impossible.
 
 ## Related work and limits
 
