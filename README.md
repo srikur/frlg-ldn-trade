@@ -11,8 +11,10 @@ not required if an existing radio and Linux driver support LDN. Switch
 not been implemented. See [software-only research](docs/SOFTWARE_ONLY.md).
 
 For the native Mac investigation, `make mac-probe` builds a read-only Wi-Fi
-capability probe. See [the findings and next experiments](docs/NATIVE_MAC.md).
-This is a diagnostic, not a live Mac trading backend.
+capability probe. `make mac-listen` builds a separate listener with an optional
+three-channel `--ldn-sweep` for finding a hosted Switch room; it interrupts
+normal Wi-Fi. See [the findings and next experiments](docs/NATIVE_MAC.md).
+These are diagnostics, not a live Mac trading backend.
 
 This fork has passed offline tests with synthetic data, including all 386
 species. **Its changes have not yet been tested against a real Switch 2.**

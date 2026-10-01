@@ -4,6 +4,8 @@ Investigated 2026-10-01. Goal: use the Mac's existing Wi-Fi to trade `.pk3`
 files with an unmodified Switch 2 running FireRed. No ESP32, USB radio, or
 Linux installation. **Native channel selection and action-frame reception are
 now demonstrated on this N1 Mac. No LDN connection or trade has been proven.**
+Only this Mac is currently available; the next experiment uses the Switch
+itself as the known nearby host, without a second receiver.
 
 ## The most useful finding
 
@@ -69,6 +71,9 @@ These are local measurements, not compatibility claims for all Macs.
 | Second capture | CoreWLAN selected channel 6 from channel 44; promiscuous mode, no BPF filter: 2,149 packets, 1,806 management frames, 269 action frames in 15 seconds; no reported drops |
 | LDN advertisements | Zero candidate LDN/FRLG headers in that capture; Switch hosting state not yet confirmed |
 | First raw-transmission attempt | `pcap_inject` accepted all 44 bytes without error; 1,551 packets received in 15 seconds, including 1,340 management and 255 action frames, no reported drops, zero matching probe responses |
+| Interface-source comparison | 44/44 bytes accepted again; 1,485 packets, 1,255 management frames, 313 actions, 833 beacons, 23 probe requests and 68 probe responses; zero matching responses, interface-address responses or request echoes; no reported drops |
+| Comparison channel/address checks | Channel 6 at both capture endpoints; assigned interface address readable and unchanged at the endpoints |
+| Private bind diagnosis, ordinary user outside sandbox | Saved errno 102 (`Operation not supported on socket`); process logs report a missing Wi-Fi DriverKit entitlement, failed `IOServiceOpen` (`0xe00002bc`), and a failed legacy IOCTL fallback |
 | Over-the-air transmission, key installation, association, trading | Not demonstrated; write acceptance alone is insufficient |
 
 The second capture establishes actual management/action-frame reception and
@@ -88,6 +93,35 @@ selected action-frame/cipher terms appeared on CWFInterface. This limited name
 search does not establish that no lower-level/private route exists. Likewise,
 Apple80211's failed bind needs further diagnosis; it is not proof that every
 private interface is inaccessible.
+
+### Why the private bind fails
+
+Inspection of the installed IO80211 framework and a fresh probe's process logs
+now provides more than the original `-1` return value. The log identifies the
+missing entitlement `com.apple.private.driverkit.driver-access`, with value
+`com.apple.private.wifi.driverkit`, then reports `IOServiceOpen` failure and
+an unsuccessful IOCTL compatibility fallback. This is a concrete access
+obstacle for the direct Apple80211 route. The IOKit status is generic; these
+observations do not establish that entitlement is the only obstacle. The
+earlier root run also failed to bind, so sudo alone has not solved it.
+
+Probe schema 2 saves errno immediately after Bind. In the ordinary-user run
+outside the execution sandbox it was 102. This is consistent with the observed
+IOCTL fallback failure, not proof of missing radio capabilities. Private API
+errno behavior is undocumented; the report labels this limitation.
+
+To inspect only this program's recent diagnostic messages after running it:
+
+```sh
+/usr/bin/log show --last 5m --style compact --predicate 'process == "macos-probe" AND (eventMessage CONTAINS[c] "entitlement" OR eventMessage CONTAINS[c] "IOServiceOpen" OR eventMessage CONTAINS[c] "BindToInterface")'
+```
+
+Runtime method enumeration also finds CoreWiFi's mediated association API
+(`associateWithParameters:error:`) and password/EAP-oriented association
+parameters, but no explicit static CCMP traffic-key setter in the inspected
+classes. This metadata check calls no setters and does not prove that a
+different mediated route is absent. A native-station implementation still
+needs a demonstrated way to install the LDN traffic keys.
 
 ## Reproduce the non-disruptive probe
 
@@ -144,6 +178,8 @@ explains why even this non-activating query needs BPF permissions.
    Apple80211/DriverKit call path and permissions, and whether it permits
    manual traffic keys and concurrent advertisement reception. The read-only
    probe deliberately does not exercise setters on the current Wi-Fi session.
+   The direct Apple80211 path now has an observed access/fallback failure;
+   symbol presence alone is not a reason to proceed to arbitrary setters.
 4. If needed, test raw transmission independently. A successful local write
    is insufficient: a peer response or a separate over-the-air observation is
    needed, followed by sustained bidirectional traffic and ACK behavior.
@@ -192,6 +228,33 @@ restore the previous network: reconnect Wi-Fi afterward. This mode reports
 the requested channel, CoreWLAN's channel readings, and pcap receive/drop stats.
 A channel value of zero means no readable value/no explicit selection, not a
 real Wi-Fi channel.
+
+### Find the Switch with one command
+
+On the Switch, go upstairs in a Pokémon Center and select **Direct Corner →
+Trade Center → Become Leader**. Leave it waiting for another player throughout
+the capture. The existing Linux library scans channels 1, 6 and 11 by default;
+the new sweep covers those same channels. These are not an exhaustive list of
+every channel on which an LDN host could operate.
+[Upstream workflow](https://github.com/tornadus/frlg-ldn-trade#usage),
+[LDN scan defaults](https://github.com/kinnay/LDN/blob/master/ldn/__init__.py)
+
+```sh
+sudo ./build/macos-listen --interface en0 --ldn-sweep --seconds 15 --all-frames
+```
+
+This listens for **15 seconds per channel**, approximately 45 seconds total,
+and disconnects normal Wi-Fi. Reconnect afterward. No probe request is sent,
+and no keys are needed to recognize public LDN headers. One JSON report
+contains each channel's existing capture report and combined header counts.
+The capture handle closes before advancing to another channel. An error stops
+the sweep and marks it incomplete; Ctrl-C reports the partial results and exits
+with status 130. Channel-selection overhead is additional to the capture time.
+
+`--ldn-sweep` cannot be combined with `--channel`, `--probe-request`, or
+`--offline`. Sweep schema 1 wraps the unchanged single-capture schema 4.
+The sweep has compiled and passed offline argument/report checks; live
+multi-channel discovery is still awaiting a hosted-room experiment.
 
 Interpretation:
 
@@ -277,10 +340,29 @@ alone cannot exclude a temporary channel/address change during the capture.
 
 Do not treat local request echoes as RF proof. Responses to the interface
 address may also originate from normal macOS scanning, so those are weaker
-evidence than responses to a fresh random address. If this remains ambiguous,
-observe the test frame on a separate existing computer on the same channel.
-That receiver is experimental equipment, not a requirement for the proposed
-single-Mac trader.
+evidence than responses to a fresh random address.
+
+**Second result:** the interface-source comparison also accepted all 44 bytes,
+with no matching responses or request echoes. The capture contained 68 probe
+responses to other destinations, showing that probe responses were receivable.
+Channel 6 and the interface address matched at the start and end. This weakens
+the source-rewriting explanation but still does not establish where the test
+frame went or prove that raw transmission is impossible. Further identical
+probe-request attempts are unlikely to resolve this uncertainty.
+
+Apple's published libpcap implementation forwards injection to a BPF `write`.
+The published XNU BPF implementation dispatches complete-header writes through
+a registered driver send callback when available, otherwise through raw
+network-interface output. It does not wait for evidence of radio delivery.
+This explains why the return value alone cannot answer our RF question;
+inspection of published code is not a trace of this N1 driver's execution.
+[Apple libpcap](https://github.com/apple-oss-distributions/libpcap/blob/main/libpcap/pcap-bpf.c),
+[XNU BPF write path](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/net/bpf.c)
+
+A separate receiver could help diagnose injection, but none is available now.
+The next experiment instead looks for the Switch's own LDN advertisements
+across the default channels. Discovery would identify a relevant peer/channel;
+it would still establish reception only, not transmission or a trade.
 
 The source uses `pcap_inject`, the same interface used by OWL's macOS path.
 [OWL transmission code](https://github.com/seemoo-lab/owl/blob/master/daemon/io.c)

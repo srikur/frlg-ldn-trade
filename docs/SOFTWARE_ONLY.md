@@ -26,14 +26,17 @@ trading individual `.pk3` files from an existing computer.
    management/action reception now work on this Mac: one 15-second capture
    delivered 2,149 packets, including 269 action frames. A subsequent injection
    call accepted a 44-byte probe request, but no matching response was observed.
-   LDN discovery, over-the-air transmission and private key-control access
-   remain unproven.
+   A comparison using the interface's assigned address had the same outcome.
+   The private Apple80211 bind logs a missing DriverKit entitlement and fails
+   both its driver connection and legacy fallback. LDN discovery, over-the-air
+   transmission and usable key-control access remain unproven.
    [Native Mac evidence and experiments](NATIVE_MAC.md)
 
 4. **Windows alternatives do not establish built-in-radio support.** The
    published `ldnd.exe` workflow uses a compatible USB adapter with a WinUSB
    driver. Porting it is a separate option. Given the preference for existing
-   hardware, the first candidate is Linux with a supported internal radio.
+   hardware, Linux with a supported internal radio is an alternative if such
+   a computer becomes available. Only the Mac is available at present.
    [Windows setup](https://gist.github.com/unlimitedcoder2/af2f09694563c6a6cd3d3e9ec45750bd)
 
 5. **Switch keys are a separate prerequisite.** The current implementation
@@ -45,11 +48,13 @@ trading individual `.pk3` files from an existing computer.
 
 ## Next evidence needed
 
-Run `python3 frlgdex.py doctor --phy phy0` on the candidate Linux computer.
-Record the OS, chipset/driver, and monitor support. The command works before
-dependencies or keys are available and reports missing prerequisites without
-printing key values. On Windows, identify the adapter model first; do not
-assume WSL exposes the physical radio.
+The current experiment uses the Mac and Switch alone. Leave FireRed waiting
+at **Direct Corner → Trade Center → Become Leader**, then use the native
+listener's `--ldn-sweep --seconds 15 --all-frames` mode to listen on channels
+1, 6 and 11. This takes roughly 45 seconds, disconnects ordinary Wi-Fi, and
+needs no keys. It tests discovery only. See the native guide for the command
+and interpretation. Private driver access and actual transmission remain
+separate research tasks.
 
 Once keys and a suitable radio are available, test discovery, room entry, one
 disposable trade, graceful exit, and a save reload on the console. Then test a

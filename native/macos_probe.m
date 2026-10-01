@@ -7,6 +7,7 @@
 #import <IOKit/IOKitLib.h>
 #import <objc/runtime.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <net/if.h>
 #include <pcap/pcap.h>
 #include <sys/utsname.h>
@@ -90,7 +91,15 @@ static NSDictionary *privateQuery(NSString *interface) {
             int status = openHandle(&handle);
             result[@"open_status"] = @(status);
             if (status == 0 && handle) {
-                result[@"bind_status"] = @(bindHandle(handle, (__bridge CFStringRef)interface));
+                errno = 0;
+                int bindStatus = bindHandle(handle, (__bridge CFStringRef)interface);
+                int bindErrno = errno;
+                result[@"bind_status"] = @(bindStatus);
+                // Diagnostic only: private APIs do not promise errno semantics.
+                // Capture it immediately, before Close or Foundation can change it.
+                result[@"errno_after_bind"] = @(bindErrno);
+                result[@"errno_after_bind_message"] = @(strerror(bindErrno));
+                result[@"errno_meaning"] = @"Saved immediately after Bind; private API errno behavior is undocumented and this may reflect an internal fallback.";
                 result[@"close_status"] = @(closeHandle(handle));
             }
         }
@@ -156,7 +165,7 @@ int main(int argc, const char **argv) {
         uname(&system);
         NSDictionary *monitor = monitorQuery(interface.UTF8String);
         NSMutableDictionary *report = [@{
-            @"schema_version": @1,
+            @"schema_version": @2,
             @"os": NSProcessInfo.processInfo.operatingSystemVersionString,
             @"architecture": @(system.machine),
             @"running_as_root": @(geteuid() == 0),

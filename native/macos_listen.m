@@ -41,6 +41,7 @@ static BOOL interfaceAddress(const char *name, uint8_t address[6]) {
 static void usage(FILE *out) {
     fprintf(out, "Usage: macos-listen [--interface en0] [--seconds 15] [--all-frames] [--channel 6]\n"
         "                    [--probe-request [--probe-source random|interface]]\n"
+        "       macos-listen --ldn-sweep [--interface en0] [--seconds 15] [--all-frames]\n"
         "       macos-listen --offline file.pcap\n"
         "Live mode enables promiscuous monitor capture for 1-60 seconds.\n"
         "It may interrupt ordinary Wi-Fi. --channel explicitly disconnects first\n"
@@ -48,15 +49,27 @@ static void usage(FILE *out) {
         "--all-frames counts all frame types instead of filtering for management.\n"
         "--probe-request sends ONE wildcard probe request and counts matching replies.\n"
         "--probe-source interface tests the current interface address instead of a random one.\n"
+        "--ldn-sweep listens on 2.4 GHz channels 1, 6, 11 for --seconds EACH.\n"
+        "It cannot be combined with --channel, --probe-request, or --offline.\n"
         "Only aggregate counts and public game IDs are printed; no packets saved.\n");
 }
 
-int main(int argc, const char **argv) {
+static int emitReport(NSDictionary *report, NSDictionary **output) {
+    if (output) { *output = report; return 0; }
+    NSData *json = [NSJSONSerialization dataWithJSONObject:report
+        options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+    if (!json) return 2;
+    fwrite(json.bytes, 1, json.length, stdout); fputc('\n', stdout);
+    return 0;
+}
+
+static int listenOnce(int argc, const char **argv, NSDictionary **output) {
     @autoreleasepool {
         const char *interface = "en0", *offline = NULL;
         double seconds = 15;
         NSInteger requestedChannel = 0;
         BOOL allFrames = NO;
+        BOOL sweep = NO;
         BOOL probeRequest = NO;
         const char *probeSourceMode = "random";
         BOOL sourceOption = NO;
@@ -66,6 +79,8 @@ int main(int argc, const char **argv) {
                 interface = argv[++i]; liveOption = YES;
             } else if (!strcmp(argv[i], "--all-frames")) {
                 allFrames = YES; liveOption = YES;
+            } else if (!strcmp(argv[i], "--ldn-sweep")) {
+                sweep = YES; liveOption = YES;
             } else if (!strcmp(argv[i], "--probe-request")) {
                 probeRequest = YES; liveOption = YES;
             } else if (!strcmp(argv[i], "--probe-source") && i + 1 < argc) {
@@ -89,7 +104,8 @@ int main(int argc, const char **argv) {
             else if (!strcmp(argv[i], "--help")) { usage(stdout); return 0; }
             else { usage(stderr); return 64; }
         }
-        if ((offline && liveOption) || (sourceOption && !probeRequest) || !*interface || strlen(interface) >= IFNAMSIZ) {
+        if ((offline && liveOption) || (sourceOption && !probeRequest) ||
+                (sweep && (requestedChannel || probeRequest)) || !*interface || strlen(interface) >= IFNAMSIZ) {
             usage(stderr); return 64;
         }
         for (const char *p = interface; *p; ++p)
@@ -98,6 +114,43 @@ int main(int argc, const char **argv) {
             }
         signal(SIGINT, stopListening);
         signal(SIGTERM, stopListening);
+        if (sweep) {
+            // Reuse the tested capture path. Each channel's BPF handle closes
+            // before the next channel is selected, including on error/Ctrl-C.
+            const char *channels[] = {"1", "6", "11"};
+            NSString *duration = [NSString stringWithFormat:@"%.17g", seconds];
+            const char *channelArgs[] = {argv[0], "--interface", interface,
+                "--seconds", duration.UTF8String, "--channel", NULL, "--all-frames", NULL};
+            NSMutableArray *results = [NSMutableArray array];
+            uint64_t totalLDN = 0, totalFRLG = 0;
+            int status = 0;
+            fprintf(stderr, "Listening on channels 1, 6 and 11 for %.0f seconds each. Keep the Switch hosting throughout; reconnect Wi-Fi afterward.\n", seconds);
+            for (unsigned i = 0; i < 3 && !interrupted; ++i) {
+                channelArgs[6] = channels[i];
+                NSDictionary *report = nil;
+                status = listenOnce(allFrames ? 8 : 7, channelArgs, &report);
+                NSMutableDictionary *result = [@{@"requested_2ghz_channel": @(atoi(channels[i])),
+                    @"exit_status": @(status)} mutableCopy];
+                if (report) {
+                    result[@"capture"] = report;
+                    totalLDN += [report[@"ldn_header_candidates"] unsignedLongLongValue];
+                    totalFRLG += [report[@"frlg_header_candidates"] unsignedLongLongValue];
+                }
+                [results addObject:result];
+                if (status) break;
+            }
+            BOOL complete = status == 0 && !interrupted && results.count == 3;
+            NSDictionary *report = @{
+                @"schema_version": @1, @"mode": @"live_passive_sweep",
+                @"requested_channels": @[@1, @6, @11], @"seconds_per_channel": @(seconds),
+                @"results": results, @"complete": @(complete), @"interrupted": @(interrupted != 0),
+                @"ldn_header_candidates": @(totalLDN), @"frlg_header_candidates": @(totalFRLG),
+                @"transmission_tested": @NO, @"ldn_compatibility": @"unproven",
+                @"interpretation": @"Unauthenticated header discovery only. This covers the LDN library's default 2.4 GHz channels, not every possible host channel. Zero matches do not establish incompatibility."
+            };
+            int jsonStatus = emitReport(report, output);
+            return interrupted ? 130 : status ? status : jsonStatus;
+        }
         char error[PCAP_ERRBUF_SIZE] = {0};
         pcap_t *handle = offline ? pcap_open_offline(offline, error) : pcap_create(interface, error);
         if (!handle) { fprintf(stderr, "%s\n", error); return 2; }
@@ -271,11 +324,12 @@ int main(int argc, const char **argv) {
             },
             @"interpretation": @"Headers are unauthenticated. Zero matches can mean the wrong channel, no host, or no usable reception."
         };
-        NSData *json = [NSJSONSerialization dataWithJSONObject:report
-            options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
-        if (!json) return 2;
-        fwrite(json.bytes, 1, json.length, stdout); fputc('\n', stdout);
+        int jsonStatus = emitReport(report, output);
         BOOL incompleteWrite = probeRequest && (injectedBytes < 0 || (size_t)injectedBytes != injectionSize);
-        return failed || incompleteWrite ? 2 : 0;
+        return failed || incompleteWrite ? 2 : jsonStatus;
     }
+}
+
+int main(int argc, const char **argv) {
+    return listenOnce(argc, argv, NULL);
 }
