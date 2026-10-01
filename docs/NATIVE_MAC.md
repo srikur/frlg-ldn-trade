@@ -256,6 +256,16 @@ with status 130. Channel-selection overhead is additional to the capture time.
 The sweep has compiled and passed offline argument/report checks; live
 multi-channel discovery is still awaiting a hosted-room experiment.
 
+The first live sweep attempt crashed after the first channel, before emitting
+JSON. The local macOS crash report showed `objc_retain` inside `listenOnce`.
+An offline regression reproduced the same crash: a report returned through an
+implicitly autoreleasing out parameter outlived the capture's autorelease
+pool. The output parameter now explicitly retains into the caller's strong
+slot. `make native-test` exercises three successive offline captures, retained
+nested reports, and JSON serialization under AddressSanitizer/UBSan. The sweep
+also prints a completion line for each channel. The failed run provides no
+LDN discovery result; the corrected live sweep still needs to be run.
+
 Interpretation:
 
 - `management_frames > 0` establishes management-frame delivery to this

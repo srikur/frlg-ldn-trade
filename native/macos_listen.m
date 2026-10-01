@@ -54,7 +54,9 @@ static void usage(FILE *out) {
         "Only aggregate counts and public game IDs are printed; no packets saved.\n");
 }
 
-static int emitReport(NSDictionary *report, NSDictionary **output) {
+// Capture has its own autorelease pool. Retain into the caller's strong slot
+// before that pool drains; an implicit __autoreleasing out parameter dangles.
+static int emitReport(NSDictionary *report, NSDictionary *__strong *output) {
     if (output) { *output = report; return 0; }
     NSData *json = [NSJSONSerialization dataWithJSONObject:report
         options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
@@ -63,7 +65,7 @@ static int emitReport(NSDictionary *report, NSDictionary **output) {
     return 0;
 }
 
-static int listenOnce(int argc, const char **argv, NSDictionary **output) {
+static int listenOnce(int argc, const char **argv, NSDictionary *__strong *output) {
     @autoreleasepool {
         const char *interface = "en0", *offline = NULL;
         double seconds = 15;
@@ -135,6 +137,9 @@ static int listenOnce(int argc, const char **argv, NSDictionary **output) {
                     result[@"capture"] = report;
                     totalLDN += [report[@"ldn_header_candidates"] unsignedLongLongValue];
                     totalFRLG += [report[@"frlg_header_candidates"] unsignedLongLongValue];
+                    fprintf(stderr, "Channel %s finished: %llu packets, %llu FRLG header candidates.\n",
+                        channels[i], [report[@"packets_examined"] unsignedLongLongValue],
+                        [report[@"frlg_header_candidates"] unsignedLongLongValue]);
                 }
                 [results addObject:result];
                 if (status) break;
